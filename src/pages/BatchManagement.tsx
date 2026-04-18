@@ -4,6 +4,12 @@ import * as projectService from '../services/projectService';
 import * as taskService from '../services/taskService';
 import type { InvalidBatchTask, Task, TaskAsset, TaskStatus } from '../types/index';
 import { useToast } from '../components/Toast';
+import {
+  ARK_LIMITS,
+  validateImageFile,
+  validateVideoFile,
+  validateAudioFile,
+} from '../utils/arkFileLimits';
 
 interface BatchManagementState {
   selectedProjectId: number | null;
@@ -33,6 +39,10 @@ function getImageCount(assets: TaskAsset[] = []) {
 
 function getAudioCount(assets: TaskAsset[] = []) {
   return assets.filter((asset) => asset.asset_type === 'audio').length;
+}
+
+function getVideoCount(assets: TaskAsset[] = []) {
+  return assets.filter((asset) => asset.asset_type === 'video').length;
 }
 
 function isDraftConfigured(task: Task, assets: TaskAsset[] = []) {
@@ -97,6 +107,7 @@ export default function BatchManagementPage() {
   const [promptDrafts, setPromptDrafts] = useState<Record<number, string>>({});
   const [uploadingImageTaskIds, setUploadingImageTaskIds] = useState<number[]>([]);
   const [uploadingAudioTaskIds, setUploadingAudioTaskIds] = useState<number[]>([]);
+  const [uploadingVideoTaskIds, setUploadingVideoTaskIds] = useState<number[]>([]);
   const [generatingTaskIds, setGeneratingTaskIds] = useState<Set<number>>(new Set());
   const [isInitializingRows, setIsInitializingRows] = useState(false);
   const [isLoadingAssets, setIsLoadingAssets] = useState(false);
@@ -513,21 +524,80 @@ export default function BatchManagementPage() {
   const handleUploadAssets = async (
     taskId: number,
     files: FileList | null,
-    assetType: 'images' | 'audios',
+    assetType: 'images' | 'audios' | 'videos',
   ) => {
     if (!files || files.length === 0) {
       return;
     }
 
     const list = Array.from(files);
-    const setUploading = assetType === 'images' ? setUploadingImageTaskIds : setUploadingAudioTaskIds;
+    const currentAssets = taskAssets[taskId] ?? [];
+    const setUploading =
+      assetType === 'images'
+        ? setUploadingImageTaskIds
+        : assetType === 'videos'
+        ? setUploadingVideoTaskIds
+        : setUploadingAudioTaskIds;
+
+    // 数量限制检查
+    if (assetType === 'images') {
+      const existing = getImageCount(currentAssets);
+      const max = ARK_LIMITS.image.countMax;
+      if (existing + list.length > max) {
+        toast.warning(`图片最多 ${max} 张（当前 ${existing}，还可添加 ${Math.max(0, max - existing)}）`);
+        return;
+      }
+    } else if (assetType === 'videos') {
+      const existing = getVideoCount(currentAssets);
+      const max = ARK_LIMITS.video.countMax;
+      if (existing + list.length > max) {
+        toast.warning(`视频最多 ${max} 个（当前 ${existing}，还可添加 ${Math.max(0, max - existing)}）`);
+        return;
+      }
+    } else {
+      const existing = getAudioCount(currentAssets);
+      const max = ARK_LIMITS.audio.countMax;
+      if (existing + list.length > max) {
+        toast.warning(`音频最多 ${max} 个（当前 ${existing}，还可添加 ${Math.max(0, max - existing)}）`);
+        return;
+      }
+    }
+
+    // 逐个文件校验
+    const validFiles: File[] = [];
+    for (const file of list) {
+      if (assetType === 'images') {
+        const result = await validateImageFile(file);
+        if (!result.ok) {
+          toast.error(result.reason);
+          continue;
+        }
+      } else if (assetType === 'videos') {
+        const result = await validateVideoFile(file);
+        if (!result.ok) {
+          toast.error(result.reason);
+          continue;
+        }
+      } else {
+        const result = await validateAudioFile(file);
+        if (!result.ok) {
+          toast.error(result.reason);
+          continue;
+        }
+      }
+      validFiles.push(file);
+    }
+
+    if (validFiles.length === 0) return;
 
     try {
       setUploading((prev) => [...prev, taskId]);
       if (assetType === 'images') {
-        await taskService.addTaskAssets(taskId, list);
+        await taskService.addTaskAssets(taskId, validFiles);
+      } else if (assetType === 'videos') {
+        await taskService.addTaskAssets(taskId, undefined, undefined, validFiles);
       } else {
-        await taskService.addTaskAssets(taskId, undefined, list);
+        await taskService.addTaskAssets(taskId, undefined, validFiles);
       }
       await refreshTaskAssets(taskId);
       setInvalidTasks((prev) => prev.filter((item) => item.taskId !== taskId));
@@ -825,11 +895,11 @@ export default function BatchManagementPage() {
                           </select>
                         </div>
 
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                           <label className="rounded-xl border border-gray-700 bg-[#0f111a] px-3 py-3 text-sm cursor-pointer hover:border-purple-500 transition-colors">
                             <div className="font-medium">上传图片</div>
                             <div className="mt-1 text-xs text-gray-500">
-                              {isUploadingImages ? '上传中...' : `当前 ${imageCount} 张，最多 5 张`}
+                              {isUploadingImages ? '上传中...' : `当前 ${imageCount} 张，最多 ${ARK_LIMITS.image.countMax} 张`}
                             </div>
                             <input
                               type="file"
@@ -845,13 +915,31 @@ export default function BatchManagementPage() {
                           </label>
 
                           <label className="rounded-xl border border-gray-700 bg-[#0f111a] px-3 py-3 text-sm cursor-pointer hover:border-purple-500 transition-colors">
-                            <div className="font-medium">上传音频</div>
+                            <div className="font-medium">上传视频</div>
                             <div className="mt-1 text-xs text-gray-500">
-                              {isUploadingAudios ? '上传中...' : `当前 ${audioCount} 个，最多 2 个`}
+                              {uploadingVideoTaskIds.includes(task.id) ? '上传中...' : `当前 ${getVideoCount(assets)} 个，最多 ${ARK_LIMITS.video.countMax} 个`}
                             </div>
                             <input
                               type="file"
-                              accept="audio/*"
+                              accept="video/mp4,video/quicktime"
+                              multiple
+                              className="hidden"
+                              disabled={uploadingVideoTaskIds.includes(task.id)}
+                              onChange={(event) => {
+                                void handleUploadAssets(task.id, event.target.files, 'videos');
+                                event.target.value = '';
+                              }}
+                            />
+                          </label>
+
+                          <label className="rounded-xl border border-gray-700 bg-[#0f111a] px-3 py-3 text-sm cursor-pointer hover:border-purple-500 transition-colors">
+                            <div className="font-medium">上传音频</div>
+                            <div className="mt-1 text-xs text-gray-500">
+                              {isUploadingAudios ? '上传中...' : `当前 ${audioCount} 个，最多 ${ARK_LIMITS.audio.countMax} 个`}
+                            </div>
+                            <input
+                              type="file"
+                              accept="audio/mpeg,audio/wav"
                               multiple
                               className="hidden"
                               disabled={isUploadingAudios}
@@ -868,6 +956,9 @@ export default function BatchManagementPage() {
                           <div className="flex flex-wrap gap-2 text-xs">
                             <span className={`px-2 py-1 rounded border ${imageCount > 0 ? 'border-green-500/30 text-green-300 bg-green-500/10' : 'border-amber-500/30 text-amber-300 bg-amber-500/10'}`}>
                               图片 {imageCount}
+                            </span>
+                            <span className={`px-2 py-1 rounded border ${getVideoCount(assets) > 0 ? 'border-purple-500/30 text-purple-300 bg-purple-500/10' : 'border-gray-700 text-gray-400 bg-gray-800/30'}`}>
+                              视频 {getVideoCount(assets)}
                             </span>
                             <span className={`px-2 py-1 rounded border ${audioCount > 0 ? 'border-blue-500/30 text-blue-300 bg-blue-500/10' : 'border-gray-700 text-gray-400 bg-gray-800/30'}`}>
                               音频 {audioCount}

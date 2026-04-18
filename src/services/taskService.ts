@@ -87,11 +87,13 @@ export async function deleteTask(id: number): Promise<void> {
 export async function addTaskAssets(
   taskId: number,
   images?: File[],
-  audios?: File[]
+  audios?: File[],
+  videos?: File[],
 ): Promise<TaskAsset[]> {
   const formData = new FormData();
   images?.forEach((file) => formData.append('images', file));
   audios?.forEach((file) => formData.append('audios', file));
+  videos?.forEach((file) => formData.append('videos', file));
 
   const response = await fetch(`${API_BASE}/tasks/${taskId}/assets`, {
     method: 'POST',
