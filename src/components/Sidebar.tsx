@@ -53,7 +53,7 @@ export default function Sidebar({ currentUser, onLogout }: SidebarProps) {
     },
     {
       id: 'BATCH_MANAGEMENT',
-      label: '批量管理',
+      label: '批量管理（暂不开放）',
       path: '/batch',
       icon: PackageIcon,
     },
@@ -102,9 +102,8 @@ export default function Sidebar({ currentUser, onLogout }: SidebarProps) {
 
       {/* 侧边栏 */}
       <aside
-        className={`fixed top-0 left-0 z-50 h-screen bg-[#1c1f2e] border-r border-gray-800 transition-all duration-300 ${
-          expanded ? 'w-60' : 'w-16'
-        } ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0`}
+        className={`fixed top-0 left-0 z-50 h-screen bg-[#1c1f2e] border-r border-gray-800 transition-all duration-300 ${expanded ? 'w-60' : 'w-16'
+          } ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0`}
       >
         {/* Logo 区域 */}
         <div className="h-16 flex items-center justify-between px-4 border-b border-gray-800">
@@ -139,11 +138,10 @@ export default function Sidebar({ currentUser, onLogout }: SidebarProps) {
                 key={item.id}
                 to={item.path}
                 onClick={() => setMobileOpen(false)}
-                className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                  active
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${active
                     ? 'bg-purple-500/20 text-purple-400'
                     : 'text-gray-400 hover:text-white hover:bg-gray-800'
-                } ${!expanded && 'justify-center'}`}
+                  } ${!expanded && 'justify-center'}`}
               >
                 <Icon className={`w-5 h-5 flex-shrink-0 ${item.accent || ''}`} />
                 {expanded && (

@@ -609,44 +609,7 @@ export default function BatchManagementPage() {
   };
 
   const handleGenerateTask = async (task: Task) => {
-    if (!localState.selectedProjectId) {
-      toast.warning('请先选择项目');
-      return;
-    }
-
-    if (generatingTaskIds.has(task.id) || hasActiveOutputTasks(outputTasksBySourceTask[task.id] ?? [])) {
-      return;
-    }
-
-    const saved = await handleSavePrompt(task);
-    if (!saved) {
-      return;
-    }
-
-    setGeneratingTaskIds((prev) => new Set(prev).add(task.id));
-    setInvalidTasks((prev) => prev.filter((item) => item.taskId !== task.id));
-
-    try {
-      await taskService.generateTaskVideo(task.id);
-      await refreshOutputTasks(localState.selectedProjectId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '生成视频失败';
-      setInvalidTasks((prev) => [
-        ...prev.filter((item) => item.taskId !== task.id),
-        {
-          taskId: task.id,
-          prompt: promptDrafts[task.id] ?? task.prompt ?? '',
-          reason: message,
-        },
-      ]);
-      toast.error(`启动生成失败：${message}`);
-    } finally {
-      setGeneratingTaskIds((prev) => {
-        const next = new Set(prev);
-        next.delete(task.id);
-        return next;
-      });
-    }
+    toast.warning('暂不开放批量生成，请使用「单任务生成」页面');
   };
 
   const getStatusClass = (status: string) => {
