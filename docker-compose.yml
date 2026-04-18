@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  seedance:
+    image: wwwzhouhui569/seedance2.0:latest
+    container_name: seedance-web
+    ports:
+      - "${PORT:-3001}:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      # 【必需】方舟官方 API Key, 整个系统共用一把; 未配置则服务无法启动
+      - ARK_API_KEY=${ARK_API_KEY:?需要在 .env 中配置 ARK_API_KEY}
+    volumes:
+      # 持久化 SQLite 数据库
+      - ./data:/app/server/data
+    restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - seedance-network
+
+networks:
+  seedance-network:
+    driver: bridge
