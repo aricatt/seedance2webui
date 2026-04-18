@@ -32,6 +32,7 @@ const TASK_COLUMNS = [
   'completed_at',
   'error_message',
   'retry_count',
+  'duration',
 ];
 
 const TASK_UPDATE_FIELDS = new Set(TASK_COLUMNS);
@@ -79,6 +80,7 @@ function normalizeTaskData(data = {}) {
     completed_at: pickFirstDefined(data.completedAt, data.completed_at, null),
     error_message: pickFirstDefined(data.errorMessage, data.error_message, null),
     retry_count: Number(pickFirstDefined(data.retryCount, data.retry_count, 0) || 0),
+    duration: pickFirstDefined(data.duration, null) != null ? Number(pickFirstDefined(data.duration, null)) : null,
   };
 }
 

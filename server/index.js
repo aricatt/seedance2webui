@@ -125,16 +125,20 @@ let taskCounter = 0;
 
 function ensureDefaultProjectForUser(userId) {
   const db = getDatabase();
+  // 查找该用户的任何一个"默认项目"（不管有没有带用户名后缀）
   const existingProject = db.prepare(`
     SELECT * FROM projects
-    WHERE user_id = ? AND name = ?
+    WHERE user_id = ? AND name LIKE '默认项目%'
     ORDER BY id ASC
     LIMIT 1
-  `).get(userId, '默认项目');
+  `).get(userId);
 
   if (existingProject) {
     return existingProject;
   }
+
+  // 获取用户名（仅用于日志）
+  const user = db.prepare('SELECT email FROM users WHERE id = ?').get(userId);
 
   return projectService.createProject({
     name: '默认项目',
@@ -262,6 +266,7 @@ app.post(
         downloadStatus: 'pending',
         progress: '正在准备...',
         startedAt: new Date().toISOString(),
+        duration: parseInt(duration) || 5,
       });
       dbTaskId = createdTask.id;
       console.log(`[生成任务] 数据库记录已创建，db_task_id = ${dbTaskId}, project_id = ${defaultProject.id}`);

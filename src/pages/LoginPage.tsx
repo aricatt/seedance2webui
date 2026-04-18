@@ -44,7 +44,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
       try {
         const result = await checkEmailStatus(formData.email);
         if (!result.isRegistered) {
-          setError('该邮箱未注册，请先注册账号');
+          setError('该账号未注册，请联系管理员');
         }
       } catch {
         // 忽略错误
@@ -75,22 +75,22 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-5">
-            {/* 邮箱输入 */}
+            {/* 账号输入 */}
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">
-                邮箱
+                账号
               </label>
               <div className="relative">
                 <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                   <MailIcon className="w-5 h-5 text-gray-500" />
                 </div>
                 <input
-                  type="email"
+                  type="text"
                   value={formData.email}
                   onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                   onBlur={handleEmailBlur}
                   className="w-full pl-12 pr-4 py-3 bg-[#0f111a] border border-gray-700 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
-                  placeholder="请输入邮箱"
+                  placeholder="请输入账号"
                   required
                 />
               </div>

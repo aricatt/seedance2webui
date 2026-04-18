@@ -127,7 +127,7 @@ export default function AdminPage() {
     const email = createForm.email.trim();
     const password = createForm.password;
     if (!email || !password) {
-      toast.warning('邮箱和密码都要填');
+      toast.warning('账号和密码都要填');
       return;
     }
     try {
@@ -293,7 +293,7 @@ export default function AdminPage() {
                         ID
                       </th>
                       <th className="px-6 py-4 text-left text-xs font-medium text-gray-400 uppercase">
-                        邮箱
+                        账号
                       </th>
                       <th className="px-6 py-4 text-left text-xs font-medium text-gray-400 uppercase">
                         角色
@@ -482,15 +482,15 @@ export default function AdminPage() {
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">邮箱</label>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">账号</label>
                   <input
-                    type="email"
+                    type="text"
                     value={createForm.email}
                     onChange={(e) =>
                       setCreateForm((f) => ({ ...f, email: e.target.value }))
                     }
                     className="w-full px-4 py-3 bg-[#0f111a] border border-gray-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
-                    placeholder="user@example.com"
+                    placeholder="输入账号（邮箱或用户名）"
                     autoFocus
                   />
                 </div>

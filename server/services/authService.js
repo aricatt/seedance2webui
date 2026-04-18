@@ -137,11 +137,12 @@ export function generateVerificationCode() {
 }
 
 /**
- * 检查邮箱是否有效
+ * 检查账号是否有效 (支持邮箱或普通用户名, 2 个字符以上即可)
  */
 export function isValidEmail(email) {
-  const regex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return regex.test(email);
+  if (typeof email !== 'string') return false;
+  const trimmed = email.trim();
+  return trimmed.length >= 2;
 }
 
 /**
@@ -159,7 +160,7 @@ export async function registerUser(email, password, emailCode) {
 
   // 验证邮箱格式
   if (!isValidEmail(email)) {
-    throw new Error('邮箱格式不正确');
+    throw new Error('账号至少 2 个字符');
   }
 
   // 验证密码强度
@@ -236,7 +237,7 @@ export async function registerUser(email, password, emailCode) {
 export function createUserByAdmin(email, password, opts = {}) {
   const db = getDatabase();
 
-  if (!isValidEmail(email)) throw new Error('邮箱格式不正确');
+  if (!isValidEmail(email)) throw new Error('账号至少 2 个字符');
   if (!isStrongPassword(password)) {
     throw new Error('请输入密码');
   }
@@ -248,7 +249,7 @@ export function createUserByAdmin(email, password, opts = {}) {
     : 10;
 
   const existing = db.prepare(`SELECT id FROM users WHERE email = ?`).get(email);
-  if (existing) throw new Error('该邮箱已被注册');
+  if (existing) throw new Error('该账号已被注册');
 
   const passwordHash = hashPassword(password);
   const result = db
@@ -283,7 +284,7 @@ export async function loginUser(email, password) {
 
   // 验证邮箱格式
   if (!isValidEmail(email)) {
-    throw new Error('邮箱格式不正确');
+    throw new Error('账号至少 2 个字符');
   }
 
   // 查找用户
@@ -518,7 +519,7 @@ export async function generateAndSaveVerificationCode(email, purpose = 'register
 
   // 验证邮箱格式
   if (!isValidEmail(email)) {
-    throw new Error('邮箱格式不正确');
+    throw new Error('账号至少 2 个字符');
   }
 
   // 检查发送频率限制（防刷）

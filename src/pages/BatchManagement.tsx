@@ -10,7 +10,7 @@ interface BatchManagementState {
   isCreatingProject: boolean;
 }
 
-const DEFAULT_DRAFT_ROWS = 10;
+const DEFAULT_DRAFT_ROWS = 1;
 const VIDEO_COUNT_OPTIONS = [1, 2, 3, 4] as const;
 const TERMINAL_OUTPUT_STATUSES: TaskStatus[] = ['done', 'error', 'cancelled'];
 
@@ -38,8 +38,8 @@ function getAudioCount(assets: TaskAsset[] = []) {
 function isDraftConfigured(task: Task, assets: TaskAsset[] = []) {
   return Boolean(
     String(task.prompt || '').trim() ||
-      assets.length > 0 ||
-      Number(task.video_count || 1) !== 1,
+    assets.length > 0 ||
+    Number(task.video_count || 1) !== 1,
   );
 }
 
@@ -638,11 +638,10 @@ export default function BatchManagementPage() {
             projects.map((project) => (
               <div
                 key={project.id}
-                className={`p-3 border-b border-gray-800 cursor-pointer transition-colors ${
-                  localState.selectedProjectId === project.id
+                className={`p-3 border-b border-gray-800 cursor-pointer transition-colors ${localState.selectedProjectId === project.id
                     ? 'bg-purple-600/20 border-purple-500/50'
                     : 'hover:bg-gray-800/50'
-                }`}
+                  }`}
                 onClick={() => handleSelectProject(project)}
               >
                 <div className="flex items-center justify-between gap-2">
@@ -684,9 +683,9 @@ export default function BatchManagementPage() {
         {selectedProject && (
           <div className="mx-4 mt-4 rounded-xl border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-xs text-blue-100">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-              <span>默认保留 10 行草稿任务，可直接编辑提示词、图片、音频和视频数量。</span>
+              <span>默认创建 1 行草稿任务，可直接编辑提示词、图片、音频和视频数量。点击下方「+ 添加任务行」增加更多。</span>
               <span>每一行都可以单独点击“生成”异步提交，不会阻塞其他任务行。</span>
-              <span>音频仅保存，不参与即梦生成校验；生成记录可到下载管理继续查看和下载。</span>
+              <span>音频仅保存，生成记录可到下载管理继续查看和下载。</span>
             </div>
           </div>
         )}
@@ -756,11 +755,10 @@ export default function BatchManagementPage() {
                 return (
                   <div
                     key={task.id}
-                    className={`rounded-2xl border p-4 ${
-                      isInvalidTask
+                    className={`rounded-2xl border p-4 ${isInvalidTask
                         ? 'border-red-500/40 bg-red-500/5'
                         : 'border-gray-800 bg-[#121625]'
-                    }`}
+                      }`}
                   >
                     <div className="flex items-start justify-between gap-4 flex-wrap">
                       <div className="flex items-center gap-3">

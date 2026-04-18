@@ -451,6 +451,7 @@ export default function DownloadManagementPage() {
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">创建人</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">提示词</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">类型</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">时长</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">状态</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">创建时间</th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase">操作</th>
@@ -486,6 +487,9 @@ export default function DownloadManagementPage() {
                     }`}>
                       {task.model_type === 'video' ? '视频' : '图片'}
                     </span>
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-300">
+                    {task.duration ? `${task.duration}s` : '-'}
                   </td>
                   <td className="px-4 py-3 text-sm">
                     <span className={`px-2 py-0.5 rounded text-xs border ${

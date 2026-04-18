@@ -16,9 +16,11 @@ export function getAllProjects(userId = null, isAdmin = false) {
   let query = `
     SELECT
       p.*,
+      u.email as owner_name,
       (SELECT COUNT(*) FROM tasks WHERE project_id = p.id) as task_count,
       (SELECT COUNT(*) FROM tasks WHERE project_id = p.id AND status = 'done') as completed_count
     FROM projects p
+    LEFT JOIN users u ON p.user_id = u.id
   `;
 
   const params = [];
@@ -32,7 +34,13 @@ export function getAllProjects(userId = null, isAdmin = false) {
   query += ` ORDER BY p.updated_at DESC`;
 
   const stmt = db.prepare(query);
-  return stmt.all(...params);
+  const rows = stmt.all(...params);
+
+  // 项目名称追加 (用户名)
+  return rows.map(row => ({
+    ...row,
+    name: row.owner_name ? `${row.name} (${row.owner_name})` : row.name,
+  }));
 }
 
 /**

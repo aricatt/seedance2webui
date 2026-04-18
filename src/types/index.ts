@@ -398,6 +398,7 @@ export interface DownloadTask {
   user_email?: string;
   hasHistory: boolean;
   model_type: 'image' | 'video';
+  duration?: number;
   effective_download_status: DownloadStatus;
 }
 
