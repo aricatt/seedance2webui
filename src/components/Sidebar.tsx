@@ -108,12 +108,12 @@ export default function Sidebar({ currentUser, onLogout }: SidebarProps) {
         {/* Logo 区域 */}
         <div className="h-16 flex items-center justify-between px-4 border-b border-gray-800">
           <div className={`flex items-center gap-3 ${!expanded && 'justify-center'}`}>
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center flex-shrink-0">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0">
               <SparkleIcon className="w-5 h-5 text-white" />
             </div>
             {expanded && (
               <span className="text-lg font-bold text-white whitespace-nowrap">
-                Seedance 2.0
+                ModelToo SD
               </span>
             )}
           </div>
@@ -139,8 +139,8 @@ export default function Sidebar({ currentUser, onLogout }: SidebarProps) {
                 to={item.path}
                 onClick={() => setMobileOpen(false)}
                 className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${active
-                    ? 'bg-purple-500/20 text-purple-400'
-                    : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                  ? 'bg-purple-500/20 text-purple-400'
+                  : 'text-gray-400 hover:text-white hover:bg-gray-800'
                   } ${!expanded && 'justify-center'}`}
               >
                 <Icon className={`w-5 h-5 flex-shrink-0 ${item.accent || ''}`} />
@@ -205,7 +205,7 @@ export default function Sidebar({ currentUser, onLogout }: SidebarProps) {
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
             <SparkleIcon className="w-5 h-5 text-white" />
           </div>
-          <span className="text-lg font-bold text-white">Seedance 2.0</span>
+          <span className="text-lg font-bold text-white">ModelToo SD</span>
         </div>
         <div className="w-10" /> {/* 占位 */}
       </header>

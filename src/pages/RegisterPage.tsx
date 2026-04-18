@@ -153,7 +153,7 @@ export default function RegisterPage({ onRegisterSuccess }: RegisterPageProps) {
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-500 to-pink-500 mb-4 shadow-lg shadow-purple-500/30">
             <SparkleIcon className="w-8 h-8 text-white" />
           </div>
-          <h1 className="text-3xl font-bold text-white mb-2">Seedance 2.0</h1>
+          <h1 className="text-3xl font-bold text-white mb-2">ModelToo SD</h1>
           <p className="text-gray-400">AI 视频生成平台</p>
         </div>
 
