@@ -812,6 +812,24 @@ export async function getSystemStats() {
 }
 
 /**
+ * 管理员 - 修改用户角色
+ */
+export async function updateUserRole(userId, role) {
+  const db = getDatabase();
+
+  if (!['user', 'admin'].includes(role)) {
+    throw new Error('无效的角色值');
+  }
+
+  db.prepare(`
+    UPDATE users SET role = ?, updated_at = datetime('now')
+    WHERE id = ?
+  `).run(role, userId);
+
+  return { success: true };
+}
+
+/**
  * 重置邮件传输器缓存（用于配置更新后）
  */
 export function resetMailTransporterCache() {

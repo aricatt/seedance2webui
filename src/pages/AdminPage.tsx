@@ -4,6 +4,7 @@ import {
   getUserList,
   updateUserStatus,
   updateUserCredits,
+  updateUserRole,
   resetUserPassword,
   adminCreateUser,
 } from '../services/authService';
@@ -38,6 +39,7 @@ export default function AdminPage() {
   const [editCredits, setEditCredits] = useState('');
   const [editOperation, setEditOperation] = useState<'set' | 'add' | 'subtract'>('set');
   const [resetPassword, setResetPassword] = useState('');
+  const [editRole, setEditRole] = useState<'user' | 'admin'>('user');
 
   // 新建用户弹窗
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -100,6 +102,7 @@ export default function AdminPage() {
     setSelectedUser(user);
     setEditCredits('');
     setResetPassword('');
+    setEditRole((user.role as 'user' | 'admin') || 'user');
     setShowUserModal(true);
   };
 
@@ -120,6 +123,19 @@ export default function AdminPage() {
       toast.success('积分已更新');
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '更新积分失败');
+    }
+  };
+
+  const handleUpdateRole = async () => {
+    if (!selectedUser) return;
+    if (editRole === selectedUser.role) return;
+    try {
+      await updateUserRole(selectedUser.id, editRole);
+      loadUsers(currentPage);
+      setShowUserModal(false);
+      toast.success(`用户 ${selectedUser.email} 的角色已更新为${editRole === 'admin' ? '管理员' : '普通用户'}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '修改角色失败');
     }
   };
 
@@ -245,8 +261,9 @@ export default function AdminPage() {
               <h2 className="text-xl font-semibold text-white">用户管理</h2>
               <div className="flex items-center gap-3">
                 <button
-                  onClick={() => setShowCreateModal(true)}
-                  className="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white text-sm font-medium rounded-xl shadow-lg shadow-purple-500/20 transition-all"
+                  disabled
+                  title="用户通过 ModelToo 系统登录时会自动创建"
+                  className="px-4 py-2 bg-gray-600/50 text-gray-500 text-sm font-medium rounded-xl cursor-not-allowed"
                 >
                   + 添加用户
                 </button>
@@ -408,6 +425,29 @@ export default function AdminPage() {
               </h3>
 
               <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                    角色
+                  </label>
+                  <div className="flex gap-2">
+                    <select
+                      value={editRole}
+                      onChange={(e) => setEditRole(e.target.value as 'user' | 'admin')}
+                      className="flex-1 px-4 py-3 bg-[#0f111a] border border-gray-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    >
+                      <option value="user">普通用户</option>
+                      <option value="admin">管理员</option>
+                    </select>
+                    <button
+                      onClick={handleUpdateRole}
+                      disabled={editRole === selectedUser.role}
+                      className="px-4 py-3 bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30 rounded-xl font-medium transition-all disabled:opacity-50 whitespace-nowrap"
+                    >
+                      更新
+                    </button>
+                  </div>
+                </div>
+
                 <div>
                   <label className="block text-sm font-medium text-gray-300 mb-2">
                     修改积分

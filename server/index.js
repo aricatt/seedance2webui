@@ -31,9 +31,62 @@ initDatabase();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
+const MODELTOO_API_URL = (process.env.MODELTOO_API_URL || '').replace(/\/+$/, '');
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+// ── ModelToo 远程账号验证 ──────────────────────────────────
+
+/**
+ * 尝试通过 ModelToo 远程 API 验证账号密码。
+ * 成功返回 { success: true }，任何失败（网络/401/超时）都返回 { success: false }。
+ */
+async function tryModelTooLogin(username, password) {
+  if (!MODELTOO_API_URL) return { success: false };
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(`${MODELTOO_API_URL}/api/v1/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (resp.ok) {
+      console.log(`[auth] ModelToo 远程验证成功: ${username}`);
+      return { success: true };
+    }
+    console.log(`[auth] ModelToo 远程验证失败 (HTTP ${resp.status}): ${username}`);
+    return { success: false };
+  } catch (err) {
+    console.log(`[auth] ModelToo 远程不可用: ${err.message}`);
+    return { success: false };
+  }
+}
+
+/**
+ * 将 ModelToo 验证通过的账号同步到本地 SQLite。
+ * - 本地不存在 → 新建用户 (role=user, credits=10)
+ * - 本地已存在 → 仅更新密码哈希
+ */
+function syncModelTooUser(username, password) {
+  const db = getDatabase();
+  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(username);
+  const passwordHash = authService.hashPassword(password);
+  if (!existing) {
+    db.prepare(
+      `INSERT INTO users (email, password_hash, role, status, credits) VALUES (?, ?, 'user', 'active', 10)`
+    ).run(username, passwordHash);
+    console.log(`[auth] 已为 ModelToo 用户 "${username}" 创建本地账号`);
+  } else {
+    db.prepare(
+      `UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`
+    ).run(passwordHash, existing.id);
+    console.log(`[auth] 已同步 ModelToo 用户 "${username}" 的密码`);
+  }
+}
 
 // 视频/音频需要比图片大得多的上限. 方舟上游 /files 对单文件有自身限制,
 // 若超出会由 Ark 服务端拒绝并返回明确错误, 这里放宽到 500MB.
@@ -1526,7 +1579,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// POST /api/auth/login - 用户登录
+// POST /api/auth/login - 用户登录（优先通过 ModelToo 远程验证）
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -1534,6 +1587,14 @@ app.post('/api/auth/login', async (req, res) => {
     if (!email || !password) {
       return res.status(400).json({ error: '邮箱和密码不能为空' });
     }
+
+    // ── 优先尝试 ModelToo 远程登录 ──
+    const modeltooResult = await tryModelTooLogin(email, password);
+    if (modeltooResult.success) {
+      // 远程验证通过 → 同步账号到本地（不存在则创建，已存在则更新密码）
+      syncModelTooUser(email, password);
+    }
+    // 远程不可用或验证失败时，不阻塞，继续走本地登录
 
     const result = await authService.loginUser(email, password);
     res.json({ success: true, data: result });
@@ -1795,6 +1856,19 @@ app.put('/api/admin/users/:id/password', authenticate, requireAdmin, async (req,
     const { newPassword } = req.body;
 
     await authService.resetUserPassword(userId, newPassword);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// PUT /api/admin/users/:id/role - 修改用户角色
+app.put('/api/admin/users/:id/role', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const { role } = req.body;
+
+    await authService.updateUserRole(userId, role);
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ error: error.message });
