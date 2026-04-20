@@ -13,9 +13,16 @@
     "install:all": "npm install && cd server && npm install"
   },
   "dependencies": {
+    "@tiptap/extension-mention": "^3.22.4",
+    "@tiptap/extension-placeholder": "^3.22.4",
+    "@tiptap/pm": "^3.22.4",
+    "@tiptap/react": "^3.22.4",
+    "@tiptap/starter-kit": "^3.22.4",
+    "@tiptap/suggestion": "^3.22.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-router-dom": "^6.22.0"
+    "react-router-dom": "^6.22.0",
+    "tippy.js": "^6.3.7"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

@@ -1,4 +1,5 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useMemo } from 'react';
+import { PromptEditor, AssetStrip, type AssetItem, type PromptEditorHandle } from '../components/PromptEditor';
 import type {
   AspectRatio,
   Duration,
@@ -63,6 +64,36 @@ export default function SingleTaskPage() {
   const [aiOptimizing, setAiOptimizing] = useState(false);
   const [aiOutput, setAiOutput] = useState('');
   const aiAbortRef = useRef<AbortController | null>(null);
+  const promptEditorRef = useRef<PromptEditorHandle>(null);
+
+  // 弹窗顶部素材条 & 编辑器需要的统一 AssetItem 列表
+  const modalAssets = useMemo<AssetItem[]>(() => {
+    const items: AssetItem[] = [];
+    images.forEach((img) => {
+      items.push({
+        kind: 'image',
+        id: img.id,
+        label: `图${img.index}`,
+        thumb: img.previewUrl,
+      });
+    });
+    videoItems.forEach((v, i) => {
+      items.push({
+        kind: 'video',
+        id: v.id,
+        label: `视频${i + 1}`,
+        thumb: v.previewUrl,
+      });
+    });
+    audioItems.forEach((a, i) => {
+      items.push({
+        kind: 'audio',
+        id: a.id,
+        label: `音频${i + 1}`,
+      });
+    });
+    return items;
+  }, [images, videoItems, audioItems]);
 
   // ==========================================================
   // 图片: 异步逐张校验, 失败的跳过并记录原因
@@ -865,14 +896,27 @@ export default function SingleTaskPage() {
               {/* 左栏: 原始提示词 */}
               <div className="flex-1 flex flex-col min-w-0">
                 <label className="block text-sm font-medium text-gray-400 mb-2">原始提示词</label>
-                <textarea
-                  className="flex-1 w-full bg-[#0f111a] border border-gray-700 rounded-xl px-4 py-3 text-sm text-gray-200 leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-purple-500 min-h-[360px]"
-                  placeholder={"【绘画风格】如：3D渲染风格 / 电影质感 / 动漫风格\n【人物】@图1（角色名）、@图2（角色名）\n【道具】@图3（道具名）\n【场景】场景描述、光影氛围\n\n【分镜】\n镜头：中景 / 特写 / 全景，运镜方式\n动作：@图1（角色名）做什么动作...\n音效：环境音 / 特效音\n对话：角色台词\n\n提示：用 @图N（名称）引用上传的参考图"}
-                  value={modalPrompt}
-                  onChange={(e) => setModalPrompt(e.target.value)}
-                  maxLength={5000}
-                  autoFocus
+
+                {/* 顶部素材缩略图条：点击插入 / 拖入编辑器任意位置 */}
+                <AssetStrip
+                  assets={modalAssets}
+                  title="可引用素材"
+                  className="mb-2"
+                  onInsert={(a) => promptEditorRef.current?.insertAsset(a)}
                 />
+
+                <div className="flex-1 w-full bg-[#0f111a] border border-gray-700 rounded-xl px-4 py-3 overflow-y-auto focus-within:ring-2 focus-within:ring-purple-500 min-h-[360px] flex">
+                  <PromptEditor
+                    ref={promptEditorRef}
+                    value={modalPrompt}
+                    onChange={setModalPrompt}
+                    assets={modalAssets}
+                    autoFocus
+                    minHeight={340}
+                    className="flex-1 w-full"
+                    placeholder={"【绘画风格】如：3D渲染风格 / 电影质感 / 动漫风格\n【人物】@图1（角色名）、@图2（角色名）\n【道具】@图3（道具名）\n【场景】场景描述、光影氛围\n\n【分镜】\n镜头：中景 / 特写 / 全景，运镜方式\n动作：@图1（角色名）做什么动作...\n音效：环境音 / 特效音\n对话：角色台词\n\n提示：从上方缩略图条把素材拖/点入提示词，任意位置都会自动生成 @图N 标记与小缩略图"}
+                  />
+                </div>
                 <div className="text-right text-xs text-gray-500 mt-1">{modalPrompt.length}/5000</div>
               </div>
 
