@@ -53,7 +53,7 @@ export default function Sidebar({ currentUser, onLogout }: SidebarProps) {
     },
     {
       id: 'BATCH_MANAGEMENT',
-      label: '批量管理（暂不开放）',
+      label: '批量管理（施工中...）',
       path: '/batch',
       icon: PackageIcon,
     },

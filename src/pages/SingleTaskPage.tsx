@@ -11,6 +11,7 @@ import { generateVideo } from '../services/videoService';
 import VideoPlayer from '../components/VideoPlayer';
 import { GearIcon, PlusIcon, CloseIcon, SparkleIcon } from '../components/Icons';
 import { useNavigate } from 'react-router-dom';
+import { getAuthSessionId } from '../services/authService';
 import {
   ARK_LIMITS,
   validateImageFile,
@@ -55,6 +56,13 @@ export default function SingleTaskPage() {
   const maxVideos = ARK_LIMITS.video.countMax;
   const maxAudios = ARK_LIMITS.audio.countMax;
   const navigate = useNavigate();
+
+  // 提示词编辑弹窗
+  const [showPromptModal, setShowPromptModal] = useState(false);
+  const [modalPrompt, setModalPrompt] = useState('');
+  const [aiOptimizing, setAiOptimizing] = useState(false);
+  const [aiOutput, setAiOutput] = useState('');
+  const aiAbortRef = useRef<AbortController | null>(null);
 
   // ==========================================================
   // 图片: 异步逐张校验, 失败的跳过并记录原因
@@ -569,18 +577,25 @@ export default function SingleTaskPage() {
           </div>
 
           {/* Prompt */}
-          <div className="bg-[#1c1f2e] rounded-2xl p-4 border border-gray-800">
-            <label className="block text-sm font-bold mb-3 text-gray-300">
-              提示词
-            </label>
-            <textarea
-              className="w-full bg-transparent text-sm resize-none focus:outline-none min-h-[100px] placeholder-gray-600 text-gray-200 leading-relaxed"
-              placeholder="描述你想要生成的视频场景。上传参考图后可使用 @1、@2 等引用图片，例如：@1 作为首帧，@2 作为尾帧，模仿 @3 的动作..."
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              maxLength={5000}
-              disabled={isGenerating}
-            />
+          <div
+            className="bg-[#1c1f2e] rounded-2xl p-4 border border-gray-800 cursor-pointer hover:border-purple-500/40 transition-all group"
+            onClick={() => {
+              if (!isGenerating) {
+                setModalPrompt(prompt);
+                setAiOutput('');
+                setShowPromptModal(true);
+              }
+            }}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <label className="block text-sm font-bold text-gray-300">
+                提示词
+              </label>
+              <span className="text-xs text-purple-400 opacity-0 group-hover:opacity-100 transition-opacity">点击展开编辑</span>
+            </div>
+            <div className="w-full bg-transparent text-sm min-h-[80px] max-h-[120px] overflow-hidden text-gray-200 leading-relaxed whitespace-pre-wrap">
+              {prompt || <span className="text-gray-600">点击此处编辑提示词...</span>}
+            </div>
             <div className="text-right text-xs text-gray-500 mt-2">
               {prompt.length}/5000
             </div>
@@ -738,6 +753,185 @@ export default function SingleTaskPage() {
           progress={generation.progress}
         />
       </div>
+
+      {/* 提示词编辑弹窗 — 左右双栏对比 */}
+      {showPromptModal && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-[#1c1f2e] border border-gray-700 rounded-2xl w-full max-w-6xl max-h-[90vh] flex flex-col shadow-2xl">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
+              <h3 className="text-lg font-bold text-white">编辑提示词</h3>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={async () => {
+                    if (aiOptimizing) {
+                      aiAbortRef.current?.abort();
+                      setAiOptimizing(false);
+                      return;
+                    }
+                    const inputPrompt = modalPrompt.trim();
+                    if (!inputPrompt) return;
+                    setAiOptimizing(true);
+                    setAiOutput('');
+                    const abortCtrl = new AbortController();
+                    aiAbortRef.current = abortCtrl;
+                    try {
+                      const sessionId = getAuthSessionId();
+                      const resp = await fetch('/api/ai/optimize-prompt', {
+                        method: 'POST',
+                        headers: {
+                          'Content-Type': 'application/json',
+                          ...(sessionId ? { 'X-Session-ID': sessionId } : {}),
+                        },
+                        body: JSON.stringify({ prompt: inputPrompt }),
+                        signal: abortCtrl.signal,
+                      });
+                      if (!resp.ok) {
+                        const err = await resp.json().catch(() => ({ error: 'Unknown error' }));
+                        setAiOutput(`错误: ${err.error || resp.statusText}`);
+                        setAiOptimizing(false);
+                        return;
+                      }
+                      const reader = resp.body!.getReader();
+                      const decoder = new TextDecoder();
+                      let buf = '';
+                      let accumulated = '';
+                      while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        buf += decoder.decode(value, { stream: true });
+                        const lines = buf.split('\n');
+                        buf = lines.pop() || '';
+                        for (const line of lines) {
+                          const trimmed = line.trim();
+                          if (!trimmed.startsWith('data: ')) continue;
+                          const data = trimmed.slice(6);
+                          if (data === '[DONE]') continue;
+                          try {
+                            const parsed = JSON.parse(data);
+                            if (parsed.content) {
+                              accumulated += parsed.content;
+                              setAiOutput(accumulated);
+                            }
+                            if (parsed.error) {
+                              setAiOutput(prev => prev + `\n\n错误: ${parsed.error}`);
+                            }
+                          } catch {}
+                        }
+                      }
+                    } catch (e: any) {
+                      if (e.name !== 'AbortError') {
+                        setAiOutput(prev => prev || `优化失败: ${e.message}`);
+                      }
+                    } finally {
+                      setAiOptimizing(false);
+                    }
+                  }}
+                  disabled={!modalPrompt.trim()}
+                  className={`px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2 transition-all ${
+                    aiOptimizing
+                      ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
+                      : 'bg-gradient-to-r from-cyan-500/20 to-blue-500/20 text-cyan-400 hover:from-cyan-500/30 hover:to-blue-500/30 disabled:opacity-40'
+                  }`}
+                >
+                  {aiOptimizing ? (
+                    <>
+                      <span className="animate-spin h-4 w-4 border-2 border-cyan-400 border-t-transparent rounded-full" />
+                      停止
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                      </svg>
+                      Kimi AI 优化
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => {
+                    aiAbortRef.current?.abort();
+                    setShowPromptModal(false);
+                  }}
+                  className="p-2 hover:bg-gray-800 rounded-lg transition-colors"
+                >
+                  <CloseIcon className="w-5 h-5 text-gray-400" />
+                </button>
+              </div>
+            </div>
+
+            {/* Body — 左右双栏 */}
+            <div className="flex-1 overflow-hidden flex flex-col md:flex-row p-6 gap-4 min-h-0">
+              {/* 左栏: 原始提示词 */}
+              <div className="flex-1 flex flex-col min-w-0">
+                <label className="block text-sm font-medium text-gray-400 mb-2">原始提示词</label>
+                <textarea
+                  className="flex-1 w-full bg-[#0f111a] border border-gray-700 rounded-xl px-4 py-3 text-sm text-gray-200 leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-purple-500 min-h-[360px]"
+                  placeholder={"【绘画风格】如：3D渲染风格 / 电影质感 / 动漫风格\n【人物】@图1（角色名）、@图2（角色名）\n【道具】@图3（道具名）\n【场景】场景描述、光影氛围\n\n【分镜】\n镜头：中景 / 特写 / 全景，运镜方式\n动作：@图1（角色名）做什么动作...\n音效：环境音 / 特效音\n对话：角色台词\n\n提示：用 @图N（名称）引用上传的参考图"}
+                  value={modalPrompt}
+                  onChange={(e) => setModalPrompt(e.target.value)}
+                  maxLength={5000}
+                  autoFocus
+                />
+                <div className="text-right text-xs text-gray-500 mt-1">{modalPrompt.length}/5000</div>
+              </div>
+
+              {/* 右栏: AI 优化结果 */}
+              <div className="flex-1 flex flex-col min-w-0">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-cyan-400">AI 优化结果</span>
+                    {aiOptimizing && (
+                      <span className="animate-spin h-3 w-3 border-2 border-cyan-400 border-t-transparent rounded-full" />
+                    )}
+                  </div>
+                  {aiOutput && !aiOptimizing && (
+                    <button
+                      onClick={() => {
+                        setModalPrompt(aiOutput);
+                        setAiOutput('');
+                      }}
+                      className="px-3 py-1 bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30 rounded-lg text-xs font-medium transition-all flex items-center gap-1"
+                    >
+                      ← 采用此结果
+                    </button>
+                  )}
+                </div>
+                <div className="flex-1 w-full bg-[#0f111a] border border-cyan-500/20 rounded-xl px-4 py-3 text-sm text-gray-200 leading-relaxed whitespace-pre-wrap overflow-y-auto min-h-[360px]">
+                  {aiOutput || (
+                    aiOptimizing
+                      ? <span className="text-gray-600 animate-pulse">正在优化中...</span>
+                      : <span className="text-gray-600">点击右上角「Kimi AI 优化」按钮，AI 将基于左侧提示词生成优化版本</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex gap-3 px-6 py-4 border-t border-gray-800">
+              <button
+                onClick={() => {
+                  aiAbortRef.current?.abort();
+                  setShowPromptModal(false);
+                }}
+                className="flex-1 px-4 py-3 bg-[#0f111a] border border-gray-700 text-white hover:bg-gray-800 rounded-xl font-medium transition-all"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  setPrompt(modalPrompt);
+                  aiAbortRef.current?.abort();
+                  setShowPromptModal(false);
+                }}
+                className="flex-1 px-4 py-3 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-xl font-medium transition-all"
+              >
+                确认
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

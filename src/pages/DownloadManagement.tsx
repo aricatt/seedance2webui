@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import * as downloadService from '../services/downloadService';
 import type { DownloadTask } from '../types/index';
 import { useToast } from '../components/Toast';
+import { useApp } from '../context/AppContext';
 
 interface DownloadState {
   tasks: DownloadTask[];
@@ -24,6 +25,9 @@ interface GeneratingTask {
 
 export default function DownloadManagementPage() {
   const { toast, confirm } = useToast();
+  const { currentUser } = useApp();
+  const isAdmin = currentUser?.role === 'admin';
+  const isLocalhost = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
   const [state, setState] = useState<DownloadState>({
     tasks: [],
     total: 0,
@@ -566,6 +570,7 @@ export default function DownloadManagementPage() {
                               </svg>
                             )}
                           </button>
+                          {isLocalhost && (
                           <button
                             onClick={() => handleOpenFolder(task.id)}
                             className="p-1 text-green-400 hover:bg-green-500/10 rounded transition-colors"
@@ -575,8 +580,10 @@ export default function DownloadManagementPage() {
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                             </svg>
                           </button>
+                          )}
                         </>
                       )}
+                      {isAdmin && (
                       <button
                         onClick={() => handleDeleteTask(task.id)}
                         className="p-1 text-red-400 hover:bg-red-500/10 rounded transition-colors"
@@ -586,6 +593,7 @@ export default function DownloadManagementPage() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                         </svg>
                       </button>
+                      )}
                     </div>
                   </td>
                 </tr>

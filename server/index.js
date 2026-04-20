@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import fs from 'fs';
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -1556,6 +1557,192 @@ app.delete('/api/download/tasks/:id', (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/download/refresh - 刷新任务状态（检查生成中的任务，自动下载已完成的）
+app.post('/api/download/refresh', authenticate, async (req, res) => {
+  try {
+    const db = getDatabase();
+    const userId = req.user.id;
+    const isAdmin = req.user.role === 'admin';
+
+    // 查找所有"生成中"或"已有 video_url 但未下载"的任务
+    const userFilter = isAdmin ? '' : 'AND t.user_id = ?';
+    const params = isAdmin ? [] : [userId];
+
+    // 1. 找出已完成但未下载的任务（有 video_url，download_status 不是 done）
+    const pendingTasks = db.prepare(`
+      SELECT t.id, t.video_url, t.video_path, t.download_status
+      FROM tasks t
+      WHERE t.task_kind = 'output'
+        AND t.video_url IS NOT NULL
+        AND (t.download_status IS NULL OR t.download_status = 'pending')
+        ${userFilter}
+    `).all(...params);
+
+    // 自动下载已完成但未保存到本地的任务
+    let refreshed = 0;
+    for (const task of pendingTasks) {
+      if (!task.video_path) {
+        try {
+          const downloadPath = videoDownloader.getDefaultDownloadPath();
+          const result = await videoDownloader.downloadVideoByTaskId(task.id, downloadPath);
+          if (result.success) {
+            videoDownloader.updateDownloadStatus(task.id, 'done', { downloadPath: result.path });
+            refreshed++;
+          }
+        } catch (e) {
+          console.error(`[refresh] 自动下载任务 ${task.id} 失败:`, e.message);
+        }
+      } else {
+        refreshed++;
+      }
+    }
+
+    // 2. 找出仍在生成中的任务
+    const generatingTasks = db.prepare(`
+      SELECT t.id as taskId, t.history_id as historyId, t.created_at as createdAt
+      FROM tasks t
+      WHERE t.task_kind = 'output'
+        AND (t.status = 'generating' OR (t.history_id IS NOT NULL AND t.video_url IS NULL AND t.status != 'cancelled' AND t.status != 'error'))
+        ${userFilter}
+      ORDER BY t.created_at DESC
+    `).all(...params);
+
+    res.json({
+      success: true,
+      data: {
+        refreshed,
+        total: pendingTasks.length + generatingTasks.length,
+        generating: generatingTasks.length,
+        generatingTasks,
+      },
+    });
+  } catch (error) {
+    console.error('[refresh] 刷新失败:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================
+// AI 提示词优化 API
+// ============================================================
+
+const LLM_API_KEY = process.env.LLM_API_KEY || '';
+const LLM_BASE_URL = (process.env.LLM_BASE_URL || '').replace(/\/+$/, '');
+const LLM_MODEL = process.env.LLM_MODEL || 'kimi-k2.5';
+
+// 从 skills 目录读取提示词优化 System Prompt
+const PROMPT_OPTIMIZER_SKILL = (() => {
+  try {
+    const skillPath = path.join(__dirname, '..', 'skills', 'Seedance 2.0 Prompt Checker', 'SKILL.md');
+    return fs.readFileSync(skillPath, 'utf-8');
+  } catch (e) {
+    console.warn('[ai] 未找到提示词优化 Skill 文件，使用默认 system prompt');
+    return '你是一个 Seedance 2.0 视频生成提示词优化专家。请帮用户优化提示词，使其更适合 AI 视频生成。直接输出优化后的提示词，不要输出其他内容。';
+  }
+})();
+
+// POST /api/ai/optimize-prompt - AI 提示词优化（SSE 流式）
+app.post('/api/ai/optimize-prompt', authenticate, async (req, res) => {
+  if (!LLM_API_KEY || !LLM_BASE_URL) {
+    return res.status(503).json({ error: 'LLM API 未配置' });
+  }
+
+  const { prompt } = req.body;
+  if (!prompt || !prompt.trim()) {
+    return res.status(400).json({ error: '提示词不能为空' });
+  }
+
+  // SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 120000);
+
+    req.on('close', () => {
+      controller.abort();
+      clearTimeout(timer);
+    });
+
+    const apiResp = await fetch(`${LLM_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${LLM_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: LLM_MODEL,
+        stream: true,
+        messages: [
+          { role: 'system', content: PROMPT_OPTIMIZER_SKILL },
+          { role: 'user', content: `请整理以下提示词的格式和结构，保留全部原始信息（对话、音效、转场等），直接输出整理后的提示词：\n\n${prompt}` },
+        ],
+        max_tokens: 4096,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+
+    if (!apiResp.ok) {
+      const errBody = await apiResp.text();
+      console.error(`[ai] LLM API 错误 (${apiResp.status}):`, errBody);
+      res.write(`data: ${JSON.stringify({ error: `LLM API 错误: ${apiResp.status}` })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+
+    // Stream SSE from LLM to client
+    const reader = apiResp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const data = trimmed.slice(6);
+        if (data === '[DONE]') {
+          res.write('data: [DONE]\n\n');
+          continue;
+        }
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            res.write(`data: ${JSON.stringify({ content: delta })}\n\n`);
+          }
+        } catch (e) {
+          // skip unparseable chunks
+        }
+      }
+    }
+
+    res.write('data: [DONE]\n\n');
+    res.end();
+  } catch (error) {
+    console.error('[ai] 提示词优化失败:', error.message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: '提示词优化失败: ' + error.message });
+    } else {
+      res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
   }
 });
 
