@@ -3,6 +3,7 @@ import * as downloadService from '../services/downloadService';
 import type { DownloadTask } from '../types/index';
 import { useToast } from '../components/Toast';
 import { useApp } from '../context/AppContext';
+import { getAuthHeaders } from '../services/authService';
 
 interface DownloadState {
   tasks: DownloadTask[];
@@ -266,6 +267,53 @@ export default function DownloadManagementPage() {
       await downloadService.openVideoFolder(taskId);
     } catch (error) {
       toast.error(`打开文件夹失败：${error instanceof Error ? error.message : error}`);
+    }
+  };
+
+  // 查看归档：拉取 HTML → blob URL → 新窗打开（绕过需要 auth header 的限制）
+  const handleOpenArchive = async (taskId: number) => {
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/archive`, {
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const win = window.open(url, '_blank', 'noopener,noreferrer');
+      if (!win) {
+        toast.error('浏览器拦截了弹窗，请允许后重试');
+      }
+      // 交给新窗口后 60s 释放 blob URL，避免即时释放导致空白页
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (error) {
+      toast.error(`查看归档失败：${error instanceof Error ? error.message : error}`);
+    }
+  };
+
+  // 下载归档到本地
+  const handleDownloadArchive = async (task: DownloadTask) => {
+    try {
+      const res = await fetch(`/api/tasks/${task.id}/archive`, {
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `archive_task${task.id}_${task.project_name || 'project'}.html`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      toast.error(`下载归档失败：${error instanceof Error ? error.message : error}`);
     }
   };
 
@@ -581,6 +629,29 @@ export default function DownloadManagementPage() {
                             </svg>
                           </button>
                           )}
+                        </>
+                      )}
+                      {/* 归档：任务提交时已生成的 HTML（含提示词 + 素材预览），离线可看 */}
+                      {task.archive_path && (
+                        <>
+                          <button
+                            onClick={() => handleOpenArchive(task.id)}
+                            className="p-1 text-cyan-400 hover:bg-cyan-500/10 rounded transition-colors"
+                            title="查看归档（含提示词+素材预览）"
+                          >
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                            </svg>
+                          </button>
+                          <button
+                            onClick={() => handleDownloadArchive(task)}
+                            className="p-1 text-indigo-400 hover:bg-indigo-500/10 rounded transition-colors"
+                            title="下载归档 HTML 到本地"
+                          >
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3M3 17V7a2 2 0 012-2h4l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+                            </svg>
+                          </button>
                         </>
                       )}
                       {isAdmin && (

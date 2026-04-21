@@ -3,7 +3,9 @@ import { getAuthHeaders } from './authService';
 
 export async function generateVideo(
   request: GenerateVideoRequest,
-  onProgress?: (message: string) => void
+  onProgress?: (message: string) => void,
+  /** 提交成功后立即回调，用于触发客户端归档等副作用 */
+  onTaskSubmitted?: (ids: { taskId: string; dbTaskId?: number }) => void,
 ): Promise<VideoGenerationResponse> {
   const formData = new FormData();
   formData.append('prompt', request.prompt);
@@ -34,10 +36,11 @@ export async function generateVideo(
     throw new Error(submitData.error || `提交失败 (HTTP ${submitRes.status})`);
   }
 
-  const { taskId } = submitData;
+  const { taskId, dbTaskId } = submitData as { taskId?: string; dbTaskId?: number };
   if (!taskId) {
     throw new Error('服务器未返回任务ID');
   }
+  onTaskSubmitted?.({ taskId, dbTaskId });
 
   // 第2步: 轮询获取结果
   onProgress?.('已提交，等待AI生成视频...');

@@ -5,6 +5,8 @@ interface AssetStripProps {
   onInsert?: (asset: AssetItem) => void;
   title?: string;
   className?: string;
+  /** 布局方向：horizontal（默认）沿水平方向排列；vertical 竖直单列 */
+  orientation?: 'horizontal' | 'vertical';
 }
 
 const KIND_BADGE: Record<AssetItem['kind'], string> = {
@@ -18,8 +20,16 @@ const KIND_BADGE: Record<AssetItem['kind'], string> = {
  * - 点击缩略图：调用 onInsert 在光标处插入 mention
  * - 拖拽缩略图：通过 DATA_TRANSFER_KEY 把 attrs 写入 dataTransfer，编辑器在 handleDrop 里精准定位位置后插入
  */
-export default function AssetStrip({ assets, onInsert, title, className }: AssetStripProps) {
+export default function AssetStrip({
+  assets,
+  onInsert,
+  title,
+  className,
+  orientation = 'horizontal',
+}: AssetStripProps) {
   if (assets.length === 0) return null;
+
+  const isVertical = orientation === 'vertical';
 
   return (
     <div className={className}>
@@ -28,7 +38,13 @@ export default function AssetStrip({ assets, onInsert, title, className }: Asset
           {title} <span className="text-gray-600">（点击或拖入提示词）</span>
         </div>
       )}
-      <div className="flex gap-2 overflow-x-auto pb-1">
+      <div
+        className={
+          isVertical
+            ? 'flex flex-col gap-2 overflow-y-auto pr-1 h-full'
+            : 'flex gap-2 overflow-x-auto pb-1'
+        }
+      >
         {assets.map((a) => {
           const attrs: AssetMentionAttrs = {
             kind: a.kind,

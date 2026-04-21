@@ -9,6 +9,7 @@ import type {
 } from '../types/index';
 import { RATIO_OPTIONS, DURATION_OPTIONS, MODEL_OPTIONS } from '../types/index';
 import { generateVideo } from '../services/videoService';
+import { archiveTask } from '../services/archiveService';
 import VideoPlayer from '../components/VideoPlayer';
 import { GearIcon, PlusIcon, CloseIcon, SparkleIcon } from '../components/Icons';
 import { useNavigate } from 'react-router-dom';
@@ -285,6 +286,24 @@ export default function SingleTaskPage() {
       progress: '正在提交视频生成请求...',
     });
 
+    // 捕获归档所需的素材快照（稍后用户可能清空状态）
+    const archiveImages = images.map((img) => ({
+      file: img.file,
+      label: `图${img.index}`,
+      originalName: img.file.name,
+    }));
+    const archiveVideos = videoItems.map((v, i) => ({
+      file: v.file,
+      label: `视频${i + 1}`,
+      originalName: v.file.name,
+      durationSeconds: v.duration,
+    }));
+    const archiveAudios = audioItems.map((a, i) => ({
+      label: `音频${i + 1}`,
+      originalName: a.file.name,
+      bytes: a.file.size,
+    }));
+
     try {
       const result = await generateVideo(
         {
@@ -298,7 +317,24 @@ export default function SingleTaskPage() {
         },
         (progress) => {
           setGeneration((prev) => ({ ...prev, progress }));
-        }
+        },
+        // 任务提交成功后立即触发客户端归档（fire-and-forget，失败不影响主流程）
+        ({ dbTaskId }) => {
+          if (!dbTaskId) return;
+          void archiveTask({
+            prompt,
+            images: archiveImages,
+            videos: archiveVideos,
+            audios: archiveAudios,
+            meta: {
+              taskId: dbTaskId,
+              submittedAt: new Date().toISOString(),
+              model,
+              ratio,
+              duration,
+            },
+          });
+        },
       );
 
       if (result.data && result.data.length > 0 && result.data[0].url) {
@@ -897,27 +933,33 @@ export default function SingleTaskPage() {
               <div className="flex-1 flex flex-col min-w-0">
                 <label className="block text-sm font-medium text-gray-400 mb-2">原始提示词</label>
 
-                {/* 顶部素材缩略图条：点击插入 / 拖入编辑器任意位置 */}
-                <AssetStrip
-                  assets={modalAssets}
-                  title="可引用素材"
-                  className="mb-2"
-                  onInsert={(a) => promptEditorRef.current?.insertAsset(a)}
-                />
+                <div className="flex-1 flex flex-row gap-3 min-h-0">
+                  {/* 左侧竖向素材缩略图条：点击插入 / 拖入编辑器任意位置 */}
+                  {modalAssets.length > 0 && (
+                    <AssetStrip
+                      assets={modalAssets}
+                      orientation="vertical"
+                      className="flex-shrink-0 w-16 h-full"
+                      onInsert={(a) => promptEditorRef.current?.insertAsset(a)}
+                    />
+                  )}
 
-                <div className="flex-1 w-full bg-[#0f111a] border border-gray-700 rounded-xl px-4 py-3 overflow-y-auto focus-within:ring-2 focus-within:ring-purple-500 min-h-[360px] flex">
-                  <PromptEditor
-                    ref={promptEditorRef}
-                    value={modalPrompt}
-                    onChange={setModalPrompt}
-                    assets={modalAssets}
-                    autoFocus
-                    minHeight={340}
-                    className="flex-1 w-full"
-                    placeholder={"【绘画风格】如：3D渲染风格 / 电影质感 / 动漫风格\n【人物】@图1（角色名）、@图2（角色名）\n【道具】@图3（道具名）\n【场景】场景描述、光影氛围\n\n【分镜】\n镜头：中景 / 特写 / 全景，运镜方式\n动作：@图1（角色名）做什么动作...\n音效：环境音 / 特效音\n对话：角色台词\n\n提示：从上方缩略图条把素材拖/点入提示词，任意位置都会自动生成 @图N 标记与小缩略图"}
-                  />
+                  <div className="flex-1 flex flex-col min-w-0">
+                    <div className="flex-1 w-full bg-[#0f111a] border border-gray-700 rounded-xl px-4 py-3 overflow-y-auto focus-within:ring-2 focus-within:ring-purple-500 min-h-[340px] flex">
+                      <PromptEditor
+                        ref={promptEditorRef}
+                        value={modalPrompt}
+                        onChange={setModalPrompt}
+                        assets={modalAssets}
+                        autoFocus
+                        minHeight={320}
+                        className="flex-1 w-full"
+                        placeholder={"【绘画风格】如：3D渲染风格 / 电影质感 / 动漫风格\n【人物】@图1（角色名）、@图2（角色名）\n【道具】@图3（道具名）\n【场景】场景描述、光影氛围\n\n【分镜】\n镜头：中景 / 特写 / 全景，运镜方式\n动作：@图1（角色名）做什么动作...\n音效：环境音 / 特效音\n对话：角色台词\n\n提示：从左侧素材条把素材拖/点入提示词，或直接输入 @ 触发候选"}
+                      />
+                    </div>
+                    <div className="text-right text-xs text-gray-500 mt-1">{modalPrompt.length}/5000</div>
+                  </div>
                 </div>
-                <div className="text-right text-xs text-gray-500 mt-1">{modalPrompt.length}/5000</div>
               </div>
 
               {/* 右栏: AI 优化结果 */}
@@ -941,11 +983,27 @@ export default function SingleTaskPage() {
                     </button>
                   )}
                 </div>
-                <div className="flex-1 w-full bg-[#0f111a] border border-cyan-500/20 rounded-xl px-4 py-3 text-sm text-gray-200 leading-relaxed whitespace-pre-wrap overflow-y-auto min-h-[360px]">
-                  {aiOutput || (
-                    aiOptimizing
-                      ? <span className="text-gray-600 animate-pulse">正在优化中...</span>
-                      : <span className="text-gray-600">点击右上角「Kimi AI 优化」按钮，AI 将基于左侧提示词生成优化版本</span>
+                <div className="flex-1 w-full bg-[#0f111a] border border-cyan-500/20 rounded-xl px-4 py-3 text-sm text-gray-200 leading-relaxed overflow-y-auto min-h-[360px]">
+                  {aiOutput ? (
+                    aiOptimizing ? (
+                      // 流式生成中：用纯文本展示，保留实时刷新感
+                      <div className="whitespace-pre-wrap">{aiOutput}</div>
+                    ) : (
+                      // 生成完成：用只读 PromptEditor，自动把 @图N/@视频N/@音频N 渲染成 chip
+                      <PromptEditor
+                        key={aiOutput}
+                        value={aiOutput}
+                        onChange={() => {}}
+                        assets={modalAssets}
+                        disabled
+                        minHeight={0}
+                        className="flex-1 w-full"
+                      />
+                    )
+                  ) : aiOptimizing ? (
+                    <span className="text-gray-600 animate-pulse">正在优化中...</span>
+                  ) : (
+                    <span className="text-gray-600">点击右上角「Kimi AI 优化」按钮，AI 将基于左侧提示词生成优化版本</span>
                   )}
                 </div>
               </div>

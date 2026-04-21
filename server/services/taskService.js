@@ -33,6 +33,7 @@ const TASK_COLUMNS = [
   'error_message',
   'retry_count',
   'duration',
+  'archive_path',
 ];
 
 const TASK_UPDATE_FIELDS = new Set(TASK_COLUMNS);

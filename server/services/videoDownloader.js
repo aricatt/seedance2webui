@@ -323,6 +323,7 @@ export function getDownloadTasks(options = {}) {
       t.created_at,
       t.completed_at,
       t.duration,
+      t.archive_path,
       p.name as project_name,
       u.email as user_email,
       CASE

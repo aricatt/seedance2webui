@@ -400,6 +400,7 @@ export interface DownloadTask {
   model_type: 'image' | 'video';
   duration?: number;
   effective_download_status: DownloadStatus;
+  archive_path?: string | null;
 }
 
 /**

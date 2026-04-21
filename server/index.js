@@ -1163,6 +1163,67 @@ app.post('/api/tasks/:id/open-folder', authenticate, async (req, res) => {
   }
 });
 
+// -------------------- 任务归档 --------------------
+// 单文件 HTML 归档存放目录: data/archives/{task_id}.html
+// 归档由客户端在 POST /api/generate-video 返回成功后立即构建并上传,
+// 包含提示词 + 输入素材预览 (图片/视频首帧压缩 JPEG, 音频仅文件名).
+
+const ARCHIVE_DIR = path.join(__dirname, '../data/archives');
+
+function ensureArchiveDir() {
+  if (!fs.existsSync(ARCHIVE_DIR)) {
+    fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+  }
+}
+
+// POST /api/tasks/:id/archive - 上传任务归档 HTML (text/html body)
+app.post(
+  '/api/tasks/:id/archive',
+  authenticate,
+  express.text({ type: ['text/html', 'text/plain'], limit: '50mb' }),
+  (req, res) => {
+    try {
+      const isAdmin = req.user.role === 'admin';
+      const task = taskService.getTaskById(req.params.id, req.user.id, isAdmin);
+      if (!task) {
+        return res.status(404).json({ error: '任务不存在或无权访问' });
+      }
+      const html = typeof req.body === 'string' ? req.body : '';
+      if (!html || html.length < 20) {
+        return res.status(400).json({ error: '归档内容为空' });
+      }
+      ensureArchiveDir();
+      const filePath = path.join(ARCHIVE_DIR, `${task.id}.html`);
+      fs.writeFileSync(filePath, html, 'utf-8');
+      taskService.updateTask(task.id, { archive_path: filePath });
+      console.log(`[archive] task ${task.id} 归档已保存 (${(html.length / 1024).toFixed(1)} KB) → ${filePath}`);
+      res.json({ success: true, size: html.length });
+    } catch (error) {
+      console.error('[archive] 保存失败:', error);
+      res.status(500).json({ error: error.message });
+    }
+  },
+);
+
+// GET /api/tasks/:id/archive - 获取归档 HTML 原文 (直接返回 HTML, 用于前端 fetch blob)
+app.get('/api/tasks/:id/archive', authenticate, (req, res) => {
+  try {
+    const isAdmin = req.user.role === 'admin';
+    const task = taskService.getTaskById(req.params.id, req.user.id, isAdmin);
+    if (!task) {
+      return res.status(404).json({ error: '任务不存在或无权访问' });
+    }
+    if (!task.archive_path || !fs.existsSync(task.archive_path)) {
+      return res.status(404).json({ error: '归档不存在' });
+    }
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    // 允许前端 fetch 读取为 blob 后 URL.createObjectURL 打开新窗
+    fs.createReadStream(task.archive_path).pipe(res);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // -------------------- 批量生成 --------------------
 // POST /api/batch/generate - 创建并启动批量任务
 app.post('/api/batch/generate', authenticate, async (req, res) => {
