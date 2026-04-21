@@ -22,6 +22,7 @@ import {
   HistoryIcon,
   PackageIcon,
   CheckIcon,
+  FilmIcon,
 } from '../components/Icons';
 import { useNavigate } from 'react-router-dom';
 import { getAuthSessionId } from '../services/authService';
@@ -173,8 +174,8 @@ export default function SingleTaskPage() {
   const [cameraFixed, setCameraFixed] = useState<boolean>(false);
   const [watermark, setWatermark] = useState<boolean>(false);
   const [generateAudio, setGenerateAudio] = useState<boolean>(true);
-  /** 右侧 VideoPlayer 是否折叠（默认展开；点击切换） */
-  const [resultCollapsed, setResultCollapsed] = useState<boolean>(false);
+  /** 视频预览弹窗是否打开；生成成功/失败时会自动打开 */
+  const [playerOpen, setPlayerOpen] = useState<boolean>(false);
   const [generation, setGeneration] = useState<GenerationState>({
     status: 'idle',
   });
@@ -846,12 +847,22 @@ export default function SingleTaskPage() {
       ? generation.result.data[0].url
       : null;
 
-  // 生成完成或出错时，自动展开右侧预览面板，确保用户能看到结果
+  // 生成完成或出错时，自动弹出视频预览弹窗，确保用户能看到结果
   useEffect(() => {
     if (generation.status === 'success' || generation.status === 'error') {
-      setResultCollapsed(false);
+      setPlayerOpen(true);
     }
   }, [generation.status]);
+
+  // Esc 关闭视频弹窗
+  useEffect(() => {
+    if (!playerOpen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPlayerOpen(false);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [playerOpen]);
 
   const revisedPrompt =
     generation.status === 'success'
@@ -867,7 +878,7 @@ export default function SingleTaskPage() {
     !isGenerating;
 
   return (
-    <div className="h-screen flex flex-col md:flex-row overflow-hidden bg-[#0f111a] text-white">
+    <div className="h-screen flex flex-col overflow-hidden bg-[#0f111a] text-white">
       {/* Mobile Header */}
       <div className="md:hidden sticky top-0 z-40 bg-[#0f111a]/95 backdrop-blur-sm px-4 py-3 flex items-center justify-between border-b border-gray-800">
         <h1 className="text-lg font-bold">{MODEL_OPTIONS.find(m => m.value === model)?.label || 'Seedance 2.0'}</h1>
@@ -879,14 +890,10 @@ export default function SingleTaskPage() {
         </button>
       </div>
 
-      {/* Left Panel — Configuration（右侧折叠时占满整屏） */}
-      <div
-        className={`flex-1 md:flex-none md:border-r border-gray-800 overflow-y-auto custom-scrollbar p-4 md:p-6 bg-[#0f111a] ${
-          resultCollapsed ? 'md:flex-1 md:w-auto' : 'md:w-[520px]'
-        }`}
-      >
-        {/* 折叠时的内部最大宽度约束，避免内容过宽 */}
-        <div className={resultCollapsed ? 'md:max-w-3xl md:mx-auto' : ''}>
+      {/* 主面板 — 配置（右侧 VideoPlayer 已改为弹窗，此处占满整屏） */}
+      <div className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 bg-[#0f111a]">
+        {/* 内容最大宽度约束，避免在超宽屏上行太长 */}
+        <div className="mx-auto w-full max-w-[1400px]">
         {/* Desktop Header */}
         <div className="hidden md:flex items-center justify-between mb-6">
           <h2 className="text-xl font-bold">{MODEL_OPTIONS.find(m => m.value === model)?.label || 'Seedance 2.0'} 视频配置</h2>
@@ -917,6 +924,37 @@ export default function SingleTaskPage() {
           >
             <PackageIcon className="w-4 h-4 text-purple-400" />
             保存预设
+          </button>
+          <button
+            onClick={() => setPlayerOpen(true)}
+            disabled={!isGenerating && !videoUrl && generation.status !== 'error'}
+            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm transition-all border ${
+              videoUrl
+                ? 'bg-purple-600/20 hover:bg-purple-600/30 border-purple-500/60 text-purple-200'
+                : isGenerating
+                  ? 'bg-[#1c1f2e] hover:bg-[#25293d] border-purple-500/40 text-purple-300'
+                  : generation.status === 'error'
+                    ? 'bg-[#1c1f2e] hover:bg-[#25293d] border-red-500/40 text-red-300'
+                    : 'bg-[#1c1f2e] border-gray-800 text-gray-500 opacity-50 cursor-not-allowed'
+            }`}
+            title={
+              videoUrl
+                ? '查看已生成的视频'
+                : isGenerating
+                  ? '查看生成进度'
+                  : generation.status === 'error'
+                    ? '查看错误详情'
+                    : '暂无视频可查看'
+            }
+          >
+            <FilmIcon className="w-4 h-4" />
+            {isGenerating
+              ? '生成中…'
+              : videoUrl
+                ? '查看视频'
+                : generation.status === 'error'
+                  ? '查看错误'
+                  : '查看视频'}
           </button>
         </div>
 
@@ -1068,7 +1106,9 @@ export default function SingleTaskPage() {
           </div>
         )}
 
-        <div className="space-y-5">
+        <div className="grid gap-5 lg:grid-cols-2 lg:gap-6 items-start">
+          {/* 左列：素材输入 + 提示词 */}
+          <div className="space-y-5 min-w-0">
           {/* Reference Images */}
           <div>
             <div className="flex justify-between items-center mb-2">
@@ -1332,7 +1372,9 @@ export default function SingleTaskPage() {
               {prompt.length}/5000
             </div>
           </div>
-
+          </div>
+          {/* 右列：视频参数 + 生成按钮 */}
+          <div className="space-y-5 min-w-0">
           {/* Settings */}
           <div className="bg-[#1c1f2e] rounded-2xl p-4 border border-gray-800 space-y-4">
             {/* 模型（紧凑：两个选项水平并列） */}
@@ -1583,62 +1625,49 @@ export default function SingleTaskPage() {
               </button>
             </div>
           </div>
+          </div>
         </div>
         </div>
       </div>
 
-      {/* Right Panel — Result（可折叠） */}
-      {resultCollapsed ? (
-        // 折叠态：仅保留一条竖向侧栏，显示状态 + 展开按钮
-        <div className="hidden md:flex w-12 flex-none bg-[#0b0c12] border-l border-gray-800 flex-col items-center py-4 gap-4">
-          <button
-            onClick={() => setResultCollapsed(false)}
-            title="展开视频预览面板"
-            className="w-9 h-9 flex items-center justify-center rounded-lg bg-[#1c1f2e] border border-gray-700 hover:border-purple-500/60 hover:text-purple-300 text-gray-400 transition-all"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </button>
-          {/* 竖向状态 */}
-          <div
-            className="flex-1 flex items-center justify-center text-[10px] text-gray-500 tracking-widest"
-            style={{ writingMode: 'vertical-rl' }}
-          >
-            {isGenerating
-              ? '生成中…'
-              : videoUrl
-                ? '已生成 ✓'
-                : generation.status === 'error'
-                  ? '生成失败'
-                  : '视频预览'}
+      {/* 视频预览弹窗（原右侧面板改为弹窗，点击顶部"查看视频"或生成完成/失败自动弹出） */}
+      {playerOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setPlayerOpen(false);
+          }}
+        >
+          <div className="relative w-full max-w-5xl max-h-[90vh] bg-[#0f111a] rounded-2xl border border-gray-800 shadow-2xl overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-800 flex-shrink-0">
+              <div className="text-sm text-gray-300 font-medium flex items-center gap-2">
+                <FilmIcon className="w-4 h-4 text-purple-400" />
+                {isGenerating
+                  ? '正在生成视频…'
+                  : videoUrl
+                    ? '生成完成'
+                    : generation.status === 'error'
+                      ? '生成失败'
+                      : '视频预览'}
+              </div>
+              <button
+                onClick={() => setPlayerOpen(false)}
+                className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-800 text-gray-400 hover:text-white transition-colors"
+                title="关闭 (Esc)"
+              >
+                <CloseIcon className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 flex flex-col overflow-y-auto min-h-[240px]">
+              <VideoPlayer
+                videoUrl={videoUrl}
+                revisedPrompt={revisedPrompt}
+                isLoading={isGenerating}
+                error={generation.status === 'error' ? generation.error : undefined}
+                progress={generation.progress}
+              />
+            </div>
           </div>
-          {videoUrl && !isGenerating && (
-            <span
-              className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.7)]"
-              title="有可用的视频结果"
-            />
-          )}
-        </div>
-      ) : (
-        <div className="flex-1 bg-[#090a0f] overflow-y-auto flex flex-col relative">
-          {/* 折叠按钮，悬浮在右上 */}
-          <button
-            onClick={() => setResultCollapsed(true)}
-            title="折叠视频预览面板，腾出更多空间给设置"
-            className="hidden md:flex absolute top-3 right-3 z-10 w-9 h-9 items-center justify-center rounded-lg bg-[#1c1f2e]/90 backdrop-blur border border-gray-700 hover:border-purple-500/60 text-gray-400 hover:text-purple-300 transition-all"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-            </svg>
-          </button>
-          <VideoPlayer
-            videoUrl={videoUrl}
-            revisedPrompt={revisedPrompt}
-            isLoading={isGenerating}
-            error={generation.status === 'error' ? generation.error : undefined}
-            progress={generation.progress}
-          />
         </div>
       )}
 
