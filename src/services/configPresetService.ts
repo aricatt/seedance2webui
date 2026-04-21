@@ -34,6 +34,10 @@ export interface AssetSnapshot {
   thumbDataUrl?: string;
   /** 视频/音频时长（秒） */
   durationSeconds?: number;
+  /** 图像 / 视频宽度（像素），用于恢复时无需再解码也能显示正确纵横比 */
+  width?: number;
+  /** 图像 / 视频高度（像素） */
+  height?: number;
   /** 原始标签（如 "图1" / "视频1" / "音频1"） */
   label?: string;
   /** 内容哈希 (SHA-256 hex)；若缺失说明本体未缓存（draft 轻量模式） */
@@ -352,7 +356,12 @@ async function videoFileToThumb(file: File): Promise<string | undefined> {
 export async function fileToAssetSnapshot(
   file: File,
   kind: AssetKind,
-  opts?: { label?: string; durationSeconds?: number },
+  opts?: {
+    label?: string;
+    durationSeconds?: number;
+    width?: number;
+    height?: number;
+  },
 ): Promise<AssetSnapshot> {
   let thumbDataUrl: string | undefined;
   if (kind === 'image') {
@@ -369,6 +378,8 @@ export async function fileToAssetSnapshot(
     lastModified: file.lastModified,
     thumbDataUrl,
     durationSeconds: opts?.durationSeconds,
+    width: opts?.width,
+    height: opts?.height,
     label: opts?.label,
     blobHash,
   };

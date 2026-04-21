@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, createContext, useContext } from 'react';
+import { useState, useEffect, useCallback, useRef, createContext, useContext } from 'react';
 
 // ============================================================
 // Types
@@ -20,6 +20,21 @@ interface ConfirmOptions {
   danger?: boolean;
 }
 
+interface PromptOptions {
+  title?: string;
+  message?: string;
+  defaultValue?: string;
+  placeholder?: string;
+  confirmText?: string;
+  cancelText?: string;
+  /** 返回非空字符串表示校验错误，返回 null 表示通过 */
+  validator?: (value: string) => string | null;
+  /** 是否允许空字符串提交；默认 false（空会触发"不能为空"校验） */
+  allowEmpty?: boolean;
+  /** 是否用多行 textarea，默认 false */
+  multiline?: boolean;
+}
+
 interface ToastContextType {
   toast: {
     success: (msg: string) => void;
@@ -28,6 +43,8 @@ interface ToastContextType {
     warning: (msg: string) => void;
   };
   confirm: (options: ConfirmOptions) => Promise<boolean>;
+  /** 文本输入弹窗；取消返回 null，确认返回 trim 后字符串 */
+  prompt: (options: PromptOptions) => Promise<string | null>;
 }
 
 // ============================================================
@@ -180,6 +197,130 @@ function ConfirmDialog({
 }
 
 // ============================================================
+// Prompt Dialog Component
+// ============================================================
+function PromptDialog({
+  options,
+  onResult,
+}: {
+  options: PromptOptions;
+  onResult: (value: string | null) => void;
+}) {
+  const [value, setValue] = useState(options.defaultValue ?? '');
+  const [error, setError] = useState<string>('');
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      inputRef.current?.focus();
+      if (inputRef.current && 'select' in inputRef.current) {
+        try {
+          (inputRef.current as HTMLInputElement).select();
+        } catch {
+          /* ignore */
+        }
+      }
+    }, 30);
+    return () => clearTimeout(t);
+  }, []);
+
+  const validate = (v: string): string | null => {
+    const trimmed = v.trim();
+    if (!trimmed && !options.allowEmpty) return '不能为空';
+    if (options.validator) return options.validator(trimmed);
+    return null;
+  };
+
+  const submit = () => {
+    const err = validate(value);
+    if (err) {
+      setError(err);
+      return;
+    }
+    onResult(options.allowEmpty ? value : value.trim());
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onResult(null);
+    } else if (e.key === 'Enter' && !options.multiline) {
+      e.preventDefault();
+      submit();
+    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && options.multiline) {
+      e.preventDefault();
+      submit();
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[9999] p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onResult(null);
+      }}
+    >
+      <div className="bg-[#1c1f2e] border border-gray-700 rounded-2xl p-6 w-full max-w-md shadow-2xl">
+        {options.title && (
+          <h3 className="text-lg font-semibold text-white mb-2">{options.title}</h3>
+        )}
+        {options.message && (
+          <p className="text-gray-400 text-sm leading-relaxed mb-4 whitespace-pre-line">
+            {options.message}
+          </p>
+        )}
+        {options.multiline ? (
+          <textarea
+            ref={(el) => {
+              inputRef.current = el;
+            }}
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value);
+              if (error) setError('');
+            }}
+            onKeyDown={handleKeyDown}
+            placeholder={options.placeholder}
+            className="w-full bg-[#0f111a] border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 resize-none min-h-[96px]"
+            rows={4}
+          />
+        ) : (
+          <input
+            ref={(el) => {
+              inputRef.current = el;
+            }}
+            type="text"
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value);
+              if (error) setError('');
+            }}
+            onKeyDown={handleKeyDown}
+            placeholder={options.placeholder}
+            className="w-full bg-[#0f111a] border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+          />
+        )}
+        {error && <div className="text-xs text-red-400 mt-2">{error}</div>}
+        <div className="flex gap-3 mt-5">
+          <button
+            onClick={() => onResult(null)}
+            className="flex-1 px-4 py-2.5 bg-[#0f111a] border border-gray-700 text-gray-300 hover:bg-gray-800 rounded-xl text-sm font-medium transition-all"
+          >
+            {options.cancelText || '取消'}
+          </button>
+          <button
+            onClick={submit}
+            className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium transition-all text-white bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
+          >
+            {options.confirmText || '确定'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // Provider
 // ============================================================
 let nextId = 0;
@@ -189,6 +330,10 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [confirmState, setConfirmState] = useState<{
     options: ConfirmOptions;
     resolve: (ok: boolean) => void;
+  } | null>(null);
+  const [promptState, setPromptState] = useState<{
+    options: PromptOptions;
+    resolve: (value: string | null) => void;
   } | null>(null);
 
   const dismiss = useCallback((id: number) => {
@@ -223,8 +368,24 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     [confirmState]
   );
 
+  const prompt = useCallback(
+    (options: PromptOptions): Promise<string | null> =>
+      new Promise((resolve) => {
+        setPromptState({ options, resolve });
+      }),
+    []
+  );
+
+  const handlePromptResult = useCallback(
+    (value: string | null) => {
+      promptState?.resolve(value);
+      setPromptState(null);
+    },
+    [promptState]
+  );
+
   return (
-    <ToastContext.Provider value={{ toast, confirm }}>
+    <ToastContext.Provider value={{ toast, confirm, prompt }}>
       {children}
 
       {/* Toast container */}
@@ -237,6 +398,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       {/* Confirm dialog */}
       {confirmState && (
         <ConfirmDialog options={confirmState.options} onResult={handleConfirmResult} />
+      )}
+
+      {/* Prompt dialog */}
+      {promptState && (
+        <PromptDialog options={promptState.options} onResult={handlePromptResult} />
       )}
     </ToastContext.Provider>
   );

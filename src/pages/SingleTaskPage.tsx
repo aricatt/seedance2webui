@@ -55,11 +55,64 @@ interface VideoItem {
   file: File;
   previewUrl: string;
   duration: number;
+  width: number;
+  height: number;
 }
 interface AudioItem {
   id: string;
   file: File;
   duration: number;
+}
+
+/**
+ * 单个视频预览 tile：根据视频宽高动态调整外框 aspect。
+ * - 已知 width/height：直接用
+ * - 未知（旧快照恢复）：先用 16/9，待 <video> onLoadedMetadata 后回调刷新
+ */
+function VideoTile({
+  item,
+  onRemove,
+  onUpdateDims,
+}: {
+  item: VideoItem;
+  onRemove: () => void;
+  onUpdateDims: (width: number, height: number) => void;
+}) {
+  const hasDims = item.width > 0 && item.height > 0;
+  const aspect = hasDims ? item.width / item.height : 16 / 9;
+  // 视觉上以固定高度 116px 为基线，按 aspect 计算 tile 宽度；并对极端比例夹断。
+  const videoHeight = 116;
+  const videoWidth = Math.max(84, Math.min(260, Math.round(videoHeight * aspect)));
+  return (
+    <div
+      className="relative bg-[#1c1f2e] rounded-xl border border-gray-700 p-1.5 flex flex-col flex-shrink-0"
+      style={{ width: videoWidth + 12 }}
+      title={item.file.name}
+    >
+      <video
+        src={item.previewUrl}
+        controls
+        className="rounded-lg bg-black"
+        style={{ width: videoWidth, height: videoHeight, objectFit: 'contain' }}
+        onLoadedMetadata={(e) => {
+          const el = e.currentTarget;
+          if (el.videoWidth > 0 && el.videoHeight > 0 && !hasDims) {
+            onUpdateDims(el.videoWidth, el.videoHeight);
+          }
+        }}
+      />
+      <div className="text-[10px] text-gray-500 mt-1 text-center">
+        {item.duration.toFixed(1)}s · {(item.file.size / 1024 / 1024).toFixed(1)} MB
+      </div>
+      <button
+        onClick={onRemove}
+        className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-gray-800 border border-gray-700 rounded-full flex items-center justify-center hover:bg-red-600 hover:border-red-600"
+        title="移除"
+      >
+        <CloseIcon className="w-3 h-3 text-white" />
+      </button>
+    </div>
+  );
 }
 
 export default function SingleTaskPage() {
@@ -93,7 +146,7 @@ export default function SingleTaskPage() {
   const promptEditorRef = useRef<PromptEditorHandle>(null);
 
   // 配置预设相关
-  const { toast } = useToast();
+  const { toast, prompt: showPrompt } = useToast();
   const [showPresetPanel, setShowPresetPanel] = useState(false);
   const [presetReloadToken, setPresetReloadToken] = useState(0);
   /** 从预设/历史加载后待补全的素材清单（按原 kind 分组，按 label 顺序） */
@@ -172,6 +225,8 @@ export default function SingleTaskPage() {
         fileToAssetSnapshot(v.file, 'video', {
           label: `视频${i + 1}`,
           durationSeconds: v.duration,
+          width: v.width,
+          height: v.height,
         }),
       ),
     );
@@ -250,6 +305,8 @@ export default function SingleTaskPage() {
             file: r.file,
             previewUrl: URL.createObjectURL(r.file),
             duration: r.snap.durationSeconds ?? 0,
+            width: r.snap.width ?? 0,
+            height: r.snap.height ?? 0,
           });
         } else {
           missingVideos.push(r.snap);
@@ -359,23 +416,24 @@ export default function SingleTaskPage() {
       return;
     }
     const defaultName = `预设 ${new Date().toLocaleString('zh-CN', { hour12: false })}`;
-    const name = window.prompt('请输入预设名称：', defaultName);
+    const name = await showPrompt({
+      title: '保存为预设',
+      message: '为当前配置命名，之后可随时加载复用。',
+      defaultValue: defaultName,
+      placeholder: '例如：产品广告 · 3D 风格',
+      confirmText: '保存',
+    });
     if (name === null) return;
-    const trimmed = name.trim();
-    if (!trimmed) {
-      toast.warning('名称不能为空');
-      return;
-    }
     try {
       const snap = await buildCurrentSnapshot();
-      await savePreset(trimmed, snap);
+      await savePreset(name, snap);
       setPresetReloadToken((n) => n + 1);
       toast.success('已保存为预设');
     } catch (e) {
       console.error('[preset] 保存预设失败', e);
       toast.error('保存失败：' + (e instanceof Error ? e.message : '未知错误'));
     }
-  }, [prompt, images, videoItems, audioItems, buildCurrentSnapshot, toast]);
+  }, [prompt, images, videoItems, audioItems, buildCurrentSnapshot, toast, showPrompt]);
 
   const dismissPending = useCallback(() => setPending(null), []);
   const dismissDraftRestore = useCallback(() => {
@@ -497,6 +555,8 @@ export default function SingleTaskPage() {
           file,
           previewUrl: URL.createObjectURL(file),
           duration: r.meta.duration,
+          width: r.meta.width,
+          height: r.meta.height,
         });
         prewarmBlob(file);
       }
@@ -907,61 +967,55 @@ export default function SingleTaskPage() {
               )}
             </div>
 
-            {/* Thumbnails */}
-            {images.length > 0 && (
-              <div className="flex flex-wrap gap-3 mb-3">
-                {images.map((img) => (
-                  <div
-                    key={img.id}
-                    className="relative group w-20 h-20 flex-shrink-0"
-                  >
-                    <img
-                      src={img.previewUrl}
-                      alt={`参考图 ${img.index}`}
-                      className="w-full h-full object-cover rounded-xl border border-gray-700"
-                    />
-                    <span className="absolute bottom-0 left-0 bg-black/70 text-[10px] text-purple-400 px-1.5 py-0.5 rounded-br-xl rounded-tl-xl font-medium">
-                      @{img.index}
-                    </span>
-                    <button
-                      onClick={() => removeImage(img.id)}
-                      className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-gray-800 border border-gray-700 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600 hover:border-red-600"
-                    >
-                      <CloseIcon className="w-3 h-3 text-white" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Upload zone */}
-            {images.length < maxImages && (
-              <div
-                onClick={() => fileInputRef.current?.click()}
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  addFiles(e.dataTransfer.files);
-                }}
-                className={`w-full ${
-                  images.length === 0 ? 'h-40 md:h-52' : 'h-24'
-                } border border-dashed border-gray-700 rounded-2xl flex flex-col items-center justify-center bg-[#1c1f2e] cursor-pointer hover:border-purple-500/50 hover:bg-[#25293d] transition-all`}
-              >
-                <div className="flex flex-col items-center gap-2">
-                  <div className="p-2 bg-gray-800 rounded-lg text-gray-400">
-                    <PlusIcon className="w-6 h-6" />
-                  </div>
-                  <span className="text-xs text-gray-500">
-                    {images.length === 0
-                      ? '点击或拖拽上传参考图（可选，最多 9 张）'
-                      : `继续添加（${images.length}/${maxImages}）`}
+            {/* Thumbnails + inline 上传 tile */}
+            <div
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                addFiles(e.dataTransfer.files);
+              }}
+              className="flex flex-wrap gap-3"
+            >
+              {images.map((img) => (
+                <div
+                  key={img.id}
+                  className="relative group w-20 h-20 flex-shrink-0"
+                >
+                  <img
+                    src={img.previewUrl}
+                    alt={`参考图 ${img.index}`}
+                    className="w-full h-full object-cover rounded-xl border border-gray-700"
+                  />
+                  <span className="absolute bottom-0 left-0 bg-black/70 text-[10px] text-purple-400 px-1.5 py-0.5 rounded-br-xl rounded-tl-xl font-medium">
+                    @{img.index}
                   </span>
-                  {images.length === 0 && (
-                    <span className="text-[10px] text-gray-600">
-                      不上传则为纯文生视频
-                    </span>
-                  )}
+                  <button
+                    onClick={() => removeImage(img.id)}
+                    className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-gray-800 border border-gray-700 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600 hover:border-red-600"
+                  >
+                    <CloseIcon className="w-3 h-3 text-white" />
+                  </button>
                 </div>
+              ))}
+
+              {/* 内联上传 tile，排在末尾，满了自动隐藏 */}
+              {images.length < maxImages && (
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-20 h-20 flex-shrink-0 border border-dashed border-gray-700 rounded-xl flex flex-col items-center justify-center bg-[#1c1f2e] cursor-pointer hover:border-purple-500/50 hover:bg-[#25293d] transition-all text-gray-500"
+                  title="点击或拖拽上传参考图（最多 9 张）"
+                >
+                  <PlusIcon className="w-5 h-5" />
+                  <span className="text-[10px] mt-1">
+                    {images.length === 0 ? '添加图片' : `${images.length}/${maxImages}`}
+                  </span>
+                </button>
+              )}
+            </div>
+            {images.length === 0 && (
+              <div className="text-[10px] text-gray-600 mt-1.5">
+                不上传则为纯文生视频
               </div>
             )}
 
@@ -1013,42 +1067,42 @@ export default function SingleTaskPage() {
               )}
             </div>
 
-            {videoItems.length > 0 && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
-                {videoItems.map((v) => (
-                  <div
-                    key={v.id}
-                    className="relative bg-[#1c1f2e] rounded-xl border border-gray-700 p-2"
-                  >
-                    <video
-                      src={v.previewUrl}
-                      controls
-                      className="w-full max-h-32 rounded-lg bg-black"
-                    />
-                    <div className="text-[11px] text-gray-500 mt-1 flex justify-between">
-                      <span className="truncate max-w-[70%]">{v.file.name}</span>
-                      <span>{v.duration.toFixed(1)}s · {(v.file.size / 1024 / 1024).toFixed(1)} MB</span>
-                    </div>
-                    <button
-                      onClick={() => removeVideo(v.id)}
-                      className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-gray-800 border border-gray-700 rounded-full flex items-center justify-center hover:bg-red-600 hover:border-red-600"
-                      title="移除"
-                    >
-                      <CloseIcon className="w-3 h-3 text-white" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
+            <div
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                addVideos(e.dataTransfer.files);
+              }}
+              className="flex flex-wrap gap-2 items-stretch"
+            >
+              {videoItems.map((v) => (
+                <VideoTile
+                  key={v.id}
+                  item={v}
+                  onUpdateDims={(w, h) =>
+                    setVideoItems((prev) =>
+                      prev.map((it) =>
+                        it.id === v.id ? { ...it, width: w, height: h } : it
+                      )
+                    )
+                  }
+                  onRemove={() => removeVideo(v.id)}
+                />
+              ))}
 
-            {videoItems.length < maxVideos && (
-              <div
-                onClick={() => videoInputRef.current?.click()}
-                className="h-16 border border-dashed border-gray-700 rounded-xl flex items-center justify-center bg-[#1c1f2e] cursor-pointer hover:border-purple-500/50 transition-all text-xs text-gray-500"
-              >
-                点击上传参考视频 (mp4/mov · 单段 2-15s, ≤50MB)
-              </div>
-            )}
+              {videoItems.length < maxVideos && (
+                <button
+                  type="button"
+                  onClick={() => videoInputRef.current?.click()}
+                  className="flex-shrink-0 border border-dashed border-gray-700 rounded-xl flex flex-col items-center justify-center bg-[#1c1f2e] cursor-pointer hover:border-purple-500/50 transition-all text-xs text-gray-500 px-4"
+                  style={{ minWidth: 140, height: 116 }}
+                  title="点击上传参考视频 (mp4/mov · 单段 2-15s, ≤50MB)"
+                >
+                  <PlusIcon className="w-5 h-5 mb-1" />
+                  {videoItems.length === 0 ? '添加视频' : `${videoItems.length}/${maxVideos}`}
+                </button>
+              )}
+            </div>
 
             <input
               ref={videoInputRef}
@@ -1079,39 +1133,49 @@ export default function SingleTaskPage() {
               )}
             </div>
 
-            {audioItems.length > 0 && (
-              <div className="space-y-2 mb-2">
-                {audioItems.map((a) => (
-                  <div
-                    key={a.id}
-                    className="bg-[#1c1f2e] rounded-xl border border-gray-700 px-3 py-2 text-xs text-gray-300 flex items-center justify-between gap-2"
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate">{a.file.name}</div>
-                      <div className="text-gray-500 mt-0.5">
-                        {a.duration.toFixed(1)}s · {(a.file.size / 1024 / 1024).toFixed(2)} MB
-                      </div>
+            <div
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                addAudios(e.dataTransfer.files);
+              }}
+              className="flex flex-wrap gap-2 items-stretch"
+            >
+              {audioItems.map((a) => (
+                <div
+                  key={a.id}
+                  className="relative group bg-[#1c1f2e] rounded-xl border border-gray-700 px-3 py-2 text-xs text-gray-300 flex items-center gap-2"
+                  style={{ maxWidth: 260 }}
+                  title={a.file.name}
+                >
+                  <div className="min-w-0">
+                    <div className="truncate max-w-[200px]">{a.file.name}</div>
+                    <div className="text-gray-500 mt-0.5">
+                      {a.duration.toFixed(1)}s · {(a.file.size / 1024 / 1024).toFixed(2)} MB
                     </div>
-                    <button
-                      onClick={() => removeAudio(a.id)}
-                      className="w-6 h-6 bg-gray-800 border border-gray-700 rounded-full flex items-center justify-center hover:bg-red-600 hover:border-red-600 flex-shrink-0"
-                      title="移除"
-                    >
-                      <CloseIcon className="w-3 h-3 text-white" />
-                    </button>
                   </div>
-                ))}
-              </div>
-            )}
+                  <button
+                    onClick={() => removeAudio(a.id)}
+                    className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-gray-800 border border-gray-700 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600 hover:border-red-600"
+                    title="移除"
+                  >
+                    <CloseIcon className="w-3 h-3 text-white" />
+                  </button>
+                </div>
+              ))}
 
-            {audioItems.length < maxAudios && (
-              <div
-                onClick={() => audioInputRef.current?.click()}
-                className="h-14 border border-dashed border-gray-700 rounded-xl flex items-center justify-center bg-[#1c1f2e] cursor-pointer hover:border-purple-500/50 transition-all text-xs text-gray-500"
-              >
-                点击上传参考音频 (mp3/wav · 单段 2-15s, ≤15MB)
-              </div>
-            )}
+              {audioItems.length < maxAudios && (
+                <button
+                  type="button"
+                  onClick={() => audioInputRef.current?.click()}
+                  className="flex-shrink-0 border border-dashed border-gray-700 rounded-xl flex items-center gap-1.5 px-4 py-2 bg-[#1c1f2e] cursor-pointer hover:border-purple-500/50 transition-all text-xs text-gray-500"
+                  title="点击上传参考音频 (mp3/wav · 单段 2-15s, ≤15MB)"
+                >
+                  <PlusIcon className="w-4 h-4" />
+                  {audioItems.length === 0 ? '添加音频' : `${audioItems.length}/${maxAudios}`}
+                </button>
+              )}
+            </div>
 
             <input
               ref={audioInputRef}

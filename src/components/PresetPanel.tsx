@@ -147,7 +147,7 @@ export default function PresetPanel({ open, onClose, onLoad, reloadToken }: Pres
   const [stats, setStats] = useState<StorageStats | null>(null);
   const [loading, setLoading] = useState(false);
   const toastCtx = useToast();
-  const { toast, confirm } = toastCtx;
+  const { toast, confirm, prompt: showPrompt } = toastCtx;
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -194,11 +194,14 @@ export default function PresetPanel({ open, onClose, onLoad, reloadToken }: Pres
   };
 
   const handleRename = async (id: string, current: string) => {
-    const next = window.prompt('新名称', current);
-    if (next === null) return;
-    const trimmed = next.trim();
-    if (!trimmed || trimmed === current) return;
-    await renamePreset(id, trimmed);
+    const next = await showPrompt({
+      title: '重命名预设',
+      defaultValue: current,
+      placeholder: '输入新名称',
+      confirmText: '保存',
+    });
+    if (next === null || next === current) return;
+    await renamePreset(id, next);
     toast.success('已重命名');
     void refresh();
   };
@@ -217,12 +220,16 @@ export default function PresetPanel({ open, onClose, onLoad, reloadToken }: Pres
   };
 
   const handlePromoteToPreset = async (snap: ConfigSnapshot) => {
-    const name = window.prompt('保存为预设，请输入名称：', `预设 ${new Date().toLocaleString('zh-CN')}`);
+    const name = await showPrompt({
+      title: '保存为预设',
+      message: '从历史记录中另存为可复用的预设。',
+      defaultValue: `预设 ${new Date().toLocaleString('zh-CN', { hour12: false })}`,
+      placeholder: '输入预设名称',
+      confirmText: '保存',
+    });
     if (name === null) return;
-    const trimmed = name.trim();
-    if (!trimmed) return;
     try {
-      await savePreset(trimmed, snap);
+      await savePreset(name, snap);
       toast.success('已保存为预设');
       void refresh();
     } catch (e) {
