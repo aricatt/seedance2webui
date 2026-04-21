@@ -101,6 +101,8 @@ const upload = multer({
 // ============================================================
 const downloadTokens = new Map();
 const DOWNLOAD_TOKEN_TTL_MS = 60 * 1000;
+// 流式播放 token 存活更久, 浏览器一次预览可能持续数分钟
+const STREAM_TOKEN_TTL_MS = 30 * 60 * 1000;
 
 function cleanupExpiredDownloadTokens() {
   const now = Date.now();
@@ -111,13 +113,21 @@ function cleanupExpiredDownloadTokens() {
   }
 }
 
-function createDownloadToken(taskId, userId) {
+/**
+ * 创建下载 token
+ * @param {string|number} taskId
+ * @param {number} userId
+ * @param {'once'|'stream'} mode - once: 一次性下载; stream: 允许多次使用 (HTTP Range)
+ */
+function createDownloadToken(taskId, userId, mode = 'once') {
   cleanupExpiredDownloadTokens();
   const token = crypto.randomBytes(24).toString('hex');
+  const ttl = mode === 'stream' ? STREAM_TOKEN_TTL_MS : DOWNLOAD_TOKEN_TTL_MS;
   downloadTokens.set(token, {
     taskId: String(taskId),
     userId: Number(userId),
-    expiresAt: Date.now() + DOWNLOAD_TOKEN_TTL_MS,
+    mode,
+    expiresAt: Date.now() + ttl,
   });
   return token;
 }
@@ -137,6 +147,21 @@ function consumeDownloadToken(token, userId = null) {
     return null;
   }
   downloadTokens.delete(token);
+  return record;
+}
+
+/** 查看 token 但不消费, 用于流式播放的多次 Range 请求 */
+function peekDownloadToken(token, userId = null) {
+  cleanupExpiredDownloadTokens();
+  const record = downloadTokens.get(token);
+  if (!record) return null;
+  if (record.expiresAt <= Date.now()) {
+    downloadTokens.delete(token);
+    return null;
+  }
+  if (userId !== null && record.userId !== Number(userId)) {
+    return null;
+  }
   return record;
 }
 
@@ -1464,6 +1489,69 @@ app.get('/api/download/file-by-token', async (req, res) => {
     }
 
     sendDownloadedVideoFile(res, result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/download/tasks/:id/stream-token - 创建一次性流式播放 token
+// 用于 /download 列表页在线预览本地已保存的视频 (支持 HTTP Range).
+// stream token 允许多次 Range 请求, 30 分钟过期.
+app.post('/api/download/tasks/:id/stream-token', authenticate, async (req, res) => {
+  try {
+    const taskId = req.params.id;
+    const result = videoDownloader.getDownloadedVideoFileByTaskId(taskId);
+
+    if (!result.success) {
+      const statusCode = result.error === '任务不存在'
+        ? 404
+        : result.error === '任务尚未下载到服务器' || result.error === '视频文件不存在，可能已被删除'
+          ? 400
+          : 500;
+      return res.status(statusCode).json({ error: result.error });
+    }
+
+    const token = createDownloadToken(taskId, req.user.id, 'stream');
+    res.json({ success: true, data: { token } });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/download/stream-by-token?token=xxx - 用 stream token 流式播放本地视频
+// 浏览器 <video> 标签会发出多次 Range 请求, 这里用 res.sendFile 让 Express 自动处理 Range.
+app.get('/api/download/stream-by-token', async (req, res) => {
+  try {
+    const token = String(req.query.token || '');
+    if (!token) {
+      return res.status(400).json({ error: '播放参数无效' });
+    }
+
+    // 用 peek 而不是 consume, 因为 <video> 会连续发多次 Range 请求
+    const record = peekDownloadToken(token);
+    if (!record || record.mode !== 'stream') {
+      return res.status(401).json({ error: '播放链接已失效' });
+    }
+
+    const result = videoDownloader.getDownloadedVideoFileByTaskId(record.taskId);
+    if (!result.success) {
+      const statusCode = result.error === '任务不存在'
+        ? 404
+        : result.error === '任务尚未下载到服务器' || result.error === '视频文件不存在，可能已被删除'
+          ? 400
+          : 500;
+      return res.status(statusCode).json({ error: result.error });
+    }
+
+    // 不设置 Content-Disposition: attachment, 让浏览器内嵌播放.
+    // res.sendFile 底层的 send 模块会自动处理 Range 请求并返回 206.
+    res.sendFile(result.filePath, {
+      headers: {
+        'Content-Type': 'video/mp4',
+        'Cache-Control': 'private, max-age=0, no-cache',
+        'Accept-Ranges': 'bytes',
+      },
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

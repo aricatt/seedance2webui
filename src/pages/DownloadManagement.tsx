@@ -25,6 +25,12 @@ interface GeneratingTask {
   elapsedSeconds: number;
 }
 
+interface PreviewState {
+  taskId: number;
+  title: string;
+  url: string;
+}
+
 export default function DownloadManagementPage() {
   const { toast, confirm } = useToast();
   const { currentUser } = useApp();
@@ -48,6 +54,7 @@ export default function DownloadManagementPage() {
   const pollIntervalRef = useRef<number | null>(null);
   const hasInitializedRef = useRef(false);
   const [generatingTasks, setGeneratingTasks] = useState<GeneratingTask[]>([]);
+  const [preview, setPreview] = useState<PreviewState | null>(null);
 
   const toGeneratingTasks = (items: Array<{ taskId: number; historyId: string; createdAt: string }> = []) =>
     items.map((task) => ({
@@ -259,6 +266,17 @@ export default function DownloadManagementPage() {
       loadTasks();
     } catch (error) {
       toast.error(`批量下载失败：${error instanceof Error ? error.message : error}`);
+    }
+  };
+
+  // 在线预览：拉取一次性 stream token，直接喂给 <video src>（不触发下载）
+  const handlePreview = async (task: DownloadTask) => {
+    try {
+      const url = await downloadService.createStreamUrl(task.id);
+      const title = task.video_path?.split('/').pop() || `任务 ${task.id}`;
+      setPreview({ taskId: task.id, title, url });
+    } catch (error) {
+      toast.error(`预览失败：${error instanceof Error ? error.message : error}`);
     }
   };
 
@@ -603,6 +621,15 @@ export default function DownloadManagementPage() {
                       {task.effective_download_status === 'done' && task.video_path && (
                         <>
                           <button
+                            onClick={() => handlePreview(task)}
+                            className="p-1 text-purple-400 hover:bg-purple-500/10 rounded transition-colors"
+                            title="在线播放"
+                          >
+                            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                              <path d="M8 5v14l11-7z" />
+                            </svg>
+                          </button>
+                          <button
                             onClick={() => handleBrowserDownload(task)}
                             disabled={downloadingIds.has(task.id)}
                             className="p-1 text-blue-400 hover:bg-blue-500/10 rounded disabled:opacity-50 transition-colors"
@@ -696,6 +723,43 @@ export default function DownloadManagementPage() {
             >
               下一页
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* 视频在线预览弹窗 */}
+      {preview && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          onClick={() => setPreview(null)}
+        >
+          <div
+            className="relative w-full max-w-5xl bg-[#0f111a] rounded-2xl border border-gray-800 shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+              <div className="text-sm text-gray-300 truncate pr-4" title={preview.title}>
+                {preview.title}
+              </div>
+              <button
+                onClick={() => setPreview(null)}
+                className="p-1.5 text-gray-400 hover:bg-gray-800 rounded-lg transition-colors"
+                title="关闭"
+                aria-label="关闭"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="bg-black">
+              <video
+                src={preview.url}
+                controls
+                autoPlay
+                className="w-full max-h-[80vh] mx-auto block"
+              />
+            </div>
           </div>
         </div>
       )}

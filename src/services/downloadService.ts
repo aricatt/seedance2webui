@@ -133,6 +133,32 @@ export async function downloadLocalVideoFile(taskId: number, fallbackFilename?: 
 }
 
 /**
+ * 创建一次性流式播放 token, 返回可直接喂给 <video src> 的 URL.
+ * 该 URL 30 分钟内有效, 支持 HTTP Range (拖动进度条).
+ */
+export async function createStreamUrl(taskId: number): Promise<string> {
+  const response = await fetch(`${API_BASE}/download/tasks/${taskId}/stream-token`, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: getAuthHeaders({
+      'Cache-Control': 'no-cache, no-store, max-age=0',
+      Pragma: 'no-cache',
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response, `获取播放链接失败（HTTP ${response.status}）`));
+  }
+
+  const result: ApiResponse<{ token: string }> = await response.json();
+  if (!result.success || !result.data?.token) {
+    throw new Error(result.error || '获取播放链接失败');
+  }
+
+  return `${API_BASE}/download/stream-by-token?token=${encodeURIComponent(result.data.token)}`;
+}
+
+/**
  * 打开视频所在文件夹
  */
 export async function openVideoFolder(taskId: number): Promise<void> {
