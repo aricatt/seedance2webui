@@ -8,7 +8,12 @@
 import { useEffect, useState, useCallback } from 'react';
 import { CloseIcon, HistoryIcon, PackageIcon, PlusIcon } from './Icons';
 import { useToast } from './Toast';
-import type { ConfigSnapshot, PresetRecord, HistoryRecord } from '../services/configPresetService';
+import type {
+  ConfigSnapshot,
+  PresetRecord,
+  HistoryRecord,
+  StorageStats,
+} from '../services/configPresetService';
 import {
   listPresets,
   listHistory,
@@ -18,7 +23,12 @@ import {
   renamePreset,
   savePreset,
   summarizeSnapshot,
+  getStorageStats,
+  runGC,
+  formatBytes,
   HISTORY_LIMIT,
+  HISTORY_SIZE_SOFT_LIMIT,
+  PRESET_SIZE_SOFT_LIMIT,
 } from '../services/configPresetService';
 
 export interface PresetPanelProps {
@@ -134,6 +144,7 @@ export default function PresetPanel({ open, onClose, onLoad, reloadToken }: Pres
   const [tab, setTab] = useState<TabKind>('history');
   const [presets, setPresets] = useState<PresetRecord[]>([]);
   const [history, setHistory] = useState<HistoryRecord[]>([]);
+  const [stats, setStats] = useState<StorageStats | null>(null);
   const [loading, setLoading] = useState(false);
   const toastCtx = useToast();
   const { toast, confirm } = toastCtx;
@@ -141,9 +152,10 @@ export default function PresetPanel({ open, onClose, onLoad, reloadToken }: Pres
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [p, h] = await Promise.all([listPresets(), listHistory()]);
+      const [p, h, s] = await Promise.all([listPresets(), listHistory(), getStorageStats()]);
       setPresets(p);
       setHistory(h);
+      setStats(s);
     } catch (e) {
       console.error('[preset-panel] 加载失败', e);
       toast.error('加载配置列表失败');
@@ -209,9 +221,27 @@ export default function PresetPanel({ open, onClose, onLoad, reloadToken }: Pres
     if (name === null) return;
     const trimmed = name.trim();
     if (!trimmed) return;
-    await savePreset(trimmed, snap);
-    toast.success('已保存为预设');
-    void refresh();
+    try {
+      await savePreset(trimmed, snap);
+      toast.success('已保存为预设');
+      void refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '保存失败');
+    }
+  };
+
+  const handleRunGC = async () => {
+    try {
+      const r = await runGC();
+      if (r.deletedCount === 0) {
+        toast.info('当前没有可回收的孤儿数据');
+      } else {
+        toast.success(`已释放 ${formatBytes(r.deletedBytes)}（${r.deletedCount} 个孤儿 Blob）`);
+      }
+      void refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '释放失败');
+    }
   };
 
   return (
@@ -338,6 +368,69 @@ export default function PresetPanel({ open, onClose, onLoad, reloadToken }: Pres
             ))
           )}
         </div>
+
+        {/* Footer · 存储统计 */}
+        {stats && (
+          <div className="px-6 py-3 border-t border-gray-800 bg-[#0a0c13] text-[11px] text-gray-400 space-y-1.5">
+            <div className="flex items-center flex-wrap gap-x-4 gap-y-1">
+              <span>
+                素材缓存 <span className="text-gray-200">{formatBytes(stats.blobBytes)}</span>
+                <span className="text-gray-600"> / {stats.blobCount} 条（已去重）</span>
+              </span>
+              <span>
+                历史占用{' '}
+                <span
+                  className={
+                    stats.historyReferencedBytes > HISTORY_SIZE_SOFT_LIMIT * 0.9
+                      ? 'text-amber-400'
+                      : 'text-gray-200'
+                  }
+                >
+                  {formatBytes(stats.historyReferencedBytes)}
+                </span>
+                <span className="text-gray-600"> / {formatBytes(HISTORY_SIZE_SOFT_LIMIT)}</span>
+              </span>
+              <span>
+                预设占用{' '}
+                <span
+                  className={
+                    stats.presetReferencedBytes > PRESET_SIZE_SOFT_LIMIT * 0.9
+                      ? 'text-amber-400'
+                      : 'text-gray-200'
+                  }
+                >
+                  {formatBytes(stats.presetReferencedBytes)}
+                </span>
+                <span className="text-gray-600"> / {formatBytes(PRESET_SIZE_SOFT_LIMIT)}</span>
+              </span>
+              {stats.browserQuota ? (
+                <span className="text-gray-500">
+                  浏览器配额 {formatBytes(stats.browserUsage)} / {formatBytes(stats.browserQuota)}
+                </span>
+              ) : null}
+              {stats.persisted === true && (
+                <span className="text-green-500 text-[10px]">● 已持久化</span>
+              )}
+              {stats.persisted === false && (
+                <span className="text-yellow-500 text-[10px]" title="浏览器在存储压力下可能整库回收">
+                  ○ 未持久化
+                </span>
+              )}
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-gray-600 truncate">
+                相同内容的素材会自动共享存储（SHA-256 内容寻址）；删除记录后自动清理孤儿
+              </div>
+              <button
+                onClick={handleRunGC}
+                className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-md text-xs transition-colors flex-shrink-0"
+                title="立即扫描并删除无人引用的素材 Blob"
+              >
+                立即释放空间
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

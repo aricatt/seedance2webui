@@ -41,6 +41,9 @@ import {
   clearDraft,
   isSnapshotEmpty,
   matchesSnapshot,
+  initStorage,
+  prewarmBlob,
+  reconstructFile,
   type ConfigSnapshot,
   type AssetSnapshot,
 } from '../services/configPresetService';
@@ -192,10 +195,11 @@ export default function SingleTaskPage() {
   }, [prompt, model, ratio, duration, images, videoItems, audioItems]);
 
   // ==========================================================
-  // 加载一个快照回填到 UI：清空现有素材 + 恢复参数 + 设置 pending
+  // 加载一个快照回填到 UI：清空现有素材 + 恢复参数 + 从 Blob 仓库重建文件
+  // 未能重建的素材（哈希缺失或已 GC）进入 pending 提示区
   // ==========================================================
   const applySnapshot = useCallback(
-    (snap: ConfigSnapshot) => {
+    async (snap: ConfigSnapshot) => {
       // 清理现有素材 URL
       images.forEach((img) => URL.revokeObjectURL(img.previewUrl));
       videoItems.forEach((v) => URL.revokeObjectURL(v.previewUrl));
@@ -211,18 +215,73 @@ export default function SingleTaskPage() {
       if (snap.ratio) setRatio(snap.ratio as AspectRatio);
       if (typeof snap.duration === 'number') setDuration(snap.duration as Duration);
 
-      // 配置待补全素材清单
-      const hasAssets =
-        snap.images.length > 0 || snap.videos.length > 0 || snap.audios.length > 0;
+      // 并发尝试重建每个素材
+      const imageResults = await Promise.all(
+        snap.images.map(async (s, i) => ({ snap: s, idx: i, file: await reconstructFile(s) })),
+      );
+      const videoResults = await Promise.all(
+        snap.videos.map(async (s, i) => ({ snap: s, idx: i, file: await reconstructFile(s) })),
+      );
+      const audioResults = await Promise.all(
+        snap.audios.map(async (s, i) => ({ snap: s, idx: i, file: await reconstructFile(s) })),
+      );
+
+      const restoredImages: UploadedImage[] = [];
+      const missingImages: AssetSnapshot[] = [];
+      imageResults.forEach((r) => {
+        if (r.file) {
+          restoredImages.push({
+            id: `img-${++nextId}`,
+            file: r.file,
+            previewUrl: URL.createObjectURL(r.file),
+            index: restoredImages.length + 1,
+          });
+        } else {
+          missingImages.push(r.snap);
+        }
+      });
+
+      const restoredVideos: VideoItem[] = [];
+      const missingVideos: AssetSnapshot[] = [];
+      videoResults.forEach((r) => {
+        if (r.file) {
+          restoredVideos.push({
+            id: `vid-${++nextId}`,
+            file: r.file,
+            previewUrl: URL.createObjectURL(r.file),
+            duration: r.snap.durationSeconds ?? 0,
+          });
+        } else {
+          missingVideos.push(r.snap);
+        }
+      });
+
+      const restoredAudios: AudioItem[] = [];
+      const missingAudios: AssetSnapshot[] = [];
+      audioResults.forEach((r) => {
+        if (r.file) {
+          restoredAudios.push({
+            id: `aud-${++nextId}`,
+            file: r.file,
+            duration: r.snap.durationSeconds ?? 0,
+          });
+        } else {
+          missingAudios.push(r.snap);
+        }
+      });
+
+      setImages(restoredImages);
+      setVideoItems(restoredVideos);
+      setAudioItems(restoredAudios);
+
+      const hasMissing =
+        missingImages.length > 0 || missingVideos.length > 0 || missingAudios.length > 0;
       setPending(
-        hasAssets
-          ? {
-              images: snap.images.slice(),
-              videos: snap.videos.slice(),
-              audios: snap.audios.slice(),
-            }
+        hasMissing
+          ? { images: missingImages, videos: missingVideos, audios: missingAudios }
           : null,
       );
+
       setGeneration({ status: 'idle' });
       setDraftToRestore(null);
       setDraftRestoreTs(null);
@@ -231,23 +290,24 @@ export default function SingleTaskPage() {
   );
 
   // ==========================================================
-  // 挂载时尝试恢复上次未提交的 draft
+  // 挂载时：初始化存储（持久化申请 + GC）并尝试恢复未提交的 draft
   // ==========================================================
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
+        await initStorage();
+        if (cancelled) return;
         const entry = await loadDraft();
         if (cancelled || !entry) return;
         if (isSnapshotEmpty(entry.snapshot)) {
           void clearDraft();
           return;
         }
-        // 只在完全"空白状态"时才提示恢复，避免覆盖用户正在编辑的内容
         setDraftToRestore(entry.snapshot);
         setDraftRestoreTs(entry.createdAt);
       } catch (e) {
-        console.warn('[preset] 加载 draft 失败', e);
+        console.warn('[preset] 初始化或加载 draft 失败', e);
       }
     })();
     return () => {
@@ -258,49 +318,32 @@ export default function SingleTaskPage() {
   }, []);
 
   // ==========================================================
-  // 离开页面前把当前状态存为 draft（若非空）
+  // 自动保存 draft：变更后 3 秒无操作就把完整快照（含哈希引用）写入
+  // 因为素材添加时已 prewarmBlob 预热，哈希基本已就绪，buildCurrentSnapshot 很快
   // ==========================================================
   useEffect(() => {
-    const handler = () => {
-      const hasAnything =
-        prompt.trim() ||
-        images.length > 0 ||
-        videoItems.length > 0 ||
-        audioItems.length > 0;
-      if (!hasAnything) {
-        void clearDraft();
-        return;
-      }
-      // 同步路径里没法 await 缩略图生成：这里存"轻量"版本，只有元数据
-      const toLiteSnap = (file: File, kind: 'image' | 'video' | 'audio', label: string, durationSeconds?: number): AssetSnapshot => ({
-        kind,
-        name: file.name,
-        size: file.size,
-        type: file.type,
-        lastModified: file.lastModified,
-        label,
-        durationSeconds,
-      });
-      const snap: ConfigSnapshot = {
-        prompt,
-        model,
-        ratio,
-        duration,
-        images: images.map((img) => toLiteSnap(img.file, 'image', `图${img.index}`)),
-        videos: videoItems.map((v, i) =>
-          toLiteSnap(v.file, 'video', `视频${i + 1}`, v.duration),
-        ),
-        audios: audioItems.map((a, i) =>
-          toLiteSnap(a.file, 'audio', `音频${i + 1}`, a.duration),
-        ),
-      };
-      void saveDraft(snap);
-    };
-    window.addEventListener('beforeunload', handler);
-    return () => {
-      window.removeEventListener('beforeunload', handler);
-    };
-  }, [prompt, model, ratio, duration, images, videoItems, audioItems]);
+    const hasAnything =
+      prompt.trim() ||
+      images.length > 0 ||
+      videoItems.length > 0 ||
+      audioItems.length > 0;
+    if (!hasAnything) {
+      // 清空状态就丢掉 draft
+      void clearDraft();
+      return;
+    }
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const snap = await buildCurrentSnapshot();
+          await saveDraft(snap);
+        } catch (e) {
+          console.warn('[preset] 自动保存 draft 失败', e);
+        }
+      })();
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [prompt, model, ratio, duration, images, videoItems, audioItems, buildCurrentSnapshot]);
 
   // ==========================================================
   // 手动保存为预设
@@ -342,11 +385,12 @@ export default function SingleTaskPage() {
   }, []);
   const doRestoreDraft = useCallback(() => {
     if (!draftToRestore) return;
-    applySnapshot(draftToRestore);
-    setDraftToRestore(null);
-    setDraftRestoreTs(null);
-    void clearDraft();
-    toast.success('已恢复上次未提交的配置');
+    void applySnapshot(draftToRestore).then(() => {
+      setDraftToRestore(null);
+      setDraftRestoreTs(null);
+      void clearDraft();
+      toast.success('已恢复上次未提交的配置');
+    });
   }, [draftToRestore, applySnapshot, toast]);
 
   // ==========================================================
@@ -381,6 +425,7 @@ export default function SingleTaskPage() {
           previewUrl: URL.createObjectURL(file),
           index: images.length + accepted.length + 1,
         });
+        prewarmBlob(file);
       }
 
       if (errors.length > 0) {
@@ -453,6 +498,7 @@ export default function SingleTaskPage() {
           previewUrl: URL.createObjectURL(file),
           duration: r.meta.duration,
         });
+        prewarmBlob(file);
       }
 
       if (errors.length) setUploadError(errors.join('; '));
@@ -503,6 +549,7 @@ export default function SingleTaskPage() {
           continue;
         }
         accepted.push({ id: `aud-${++nextId}`, file, duration: r.meta.duration });
+        prewarmBlob(file);
       }
 
       if (errors.length) setUploadError(errors.join('; '));
