@@ -28,6 +28,25 @@ function ensureDir(dirPath) {
 }
 
 /**
+ * 规范化存储路径：展开 ~ 并统一路径分隔符
+ * - Node.js fs 不会自动展开 ~
+ * - 数据库中可能存有 Windows 反斜杠路径，在 macOS/Linux 上 fs 不认
+ */
+function resolvePath(filePath) {
+  if (!filePath) return filePath;
+  // 1. 统一反斜杠为正斜杠（在非 Windows 平台上反斜杠不是分隔符）
+  let resolved = process.platform === 'win32' ? filePath : filePath.replace(/\\/g, '/');
+  // 2. 展开 ~
+  if (resolved.startsWith('~')) {
+    const homedir = process.platform === 'win32'
+      ? process.env.USERPROFILE
+      : process.env.HOME;
+    resolved = path.join(homedir, resolved.slice(1).replace(/^[\/\\]/, ''));
+  }
+  return path.normalize(resolved);
+}
+
+/**
  * 下载视频到本地
  * @param {string} videoUrl - 视频 URL
  * @param {string} savePath - 保存路径（目录）
@@ -158,15 +177,17 @@ export function getDownloadedVideoFileByTaskId(taskId) {
       return { success: false, error: '任务尚未下载到服务器' };
     }
 
-    if (!fs.existsSync(task.video_path)) {
-      return { success: false, error: '视频文件不存在，可能已被删除' };
+    const resolvedPath = resolvePath(task.video_path);
+
+    if (!fs.existsSync(resolvedPath)) {
+      return { success: false, error: `视频文件不存在，可能已被删除。\n文件记录路径：${resolvedPath}` };
     }
 
     return {
       success: true,
       task,
-      filePath: task.video_path,
-      filename: path.basename(task.video_path) || buildTaskVideoFilename(task, taskId),
+      filePath: resolvedPath,
+      filename: path.basename(resolvedPath) || buildTaskVideoFilename(task, taskId),
     };
   } catch (error) {
     return { success: false, error: error.message };
@@ -224,7 +245,7 @@ export function getDefaultDownloadPath() {
   const row = db.prepare(`SELECT value FROM settings WHERE key = 'download_path'`).get();
 
   if (row && row.value) {
-    return row.value;
+    return resolvePath(row.value);
   }
 
   // 默认下载到用户目录下的 Videos/Seedance 文件夹

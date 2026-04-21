@@ -1448,7 +1448,7 @@ app.post('/api/download/tasks/:id/file-token', authenticate, async (req, res) =>
     if (!result.success) {
       const statusCode = result.error === '任务不存在'
         ? 404
-        : result.error === '任务尚未下载到服务器' || result.error === '视频文件不存在，可能已被删除'
+        : result.error === '任务尚未下载到服务器' || result.error.startsWith('视频文件不存在')
           ? 400
           : 500;
       return res.status(statusCode).json({ error: result.error });
@@ -1482,7 +1482,7 @@ app.get('/api/download/file-by-token', async (req, res) => {
     if (!result.success) {
       const statusCode = result.error === '任务不存在'
         ? 404
-        : result.error === '任务尚未下载到服务器' || result.error === '视频文件不存在，可能已被删除'
+        : result.error === '任务尚未下载到服务器' || result.error.startsWith('视频文件不存在')
           ? 400
           : 500;
       return res.status(statusCode).json({ error: result.error });
@@ -1505,7 +1505,7 @@ app.post('/api/download/tasks/:id/stream-token', authenticate, async (req, res) 
     if (!result.success) {
       const statusCode = result.error === '任务不存在'
         ? 404
-        : result.error === '任务尚未下载到服务器' || result.error === '视频文件不存在，可能已被删除'
+        : result.error === '任务尚未下载到服务器' || result.error.startsWith('视频文件不存在')
           ? 400
           : 500;
       return res.status(statusCode).json({ error: result.error });
@@ -1537,7 +1537,7 @@ app.get('/api/download/stream-by-token', async (req, res) => {
     if (!result.success) {
       const statusCode = result.error === '任务不存在'
         ? 404
-        : result.error === '任务尚未下载到服务器' || result.error === '视频文件不存在，可能已被删除'
+        : result.error === '任务尚未下载到服务器' || result.error.startsWith('视频文件不存在')
           ? 400
           : 500;
       return res.status(statusCode).json({ error: result.error });
@@ -1566,7 +1566,7 @@ app.get('/api/download/tasks/:id/file', authenticate, async (req, res) => {
     if (!result.success) {
       const statusCode = result.error === '任务不存在'
         ? 404
-        : result.error === '任务尚未下载到服务器' || result.error === '视频文件不存在，可能已被删除'
+        : result.error === '任务尚未下载到服务器' || result.error.startsWith('视频文件不存在')
           ? 400
           : 500;
       return res.status(statusCode).json({ error: result.error });
