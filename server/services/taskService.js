@@ -31,6 +31,7 @@ const TASK_COLUMNS = [
   'started_at',
   'completed_at',
   'error_message',
+  'revised_prompt',
   'retry_count',
   'duration',
   'archive_path',

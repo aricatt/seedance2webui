@@ -254,6 +254,7 @@ class BatchScheduler {
         video_url: result.videoUrl,
         progress: '视频生成完成',
         error_message: null,
+        revised_prompt: result.revisedPrompt || null,
       });
 
       this._mergeTaskSnapshot(taskId, {

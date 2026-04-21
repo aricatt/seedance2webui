@@ -109,6 +109,133 @@ function ToggleChip({
 }
 
 /**
+ * 右上角视频结果预览卡片（放大版）：
+ * - 空闲：占位图，提示"生成结果将在此处预览"
+ * - 生成中：spinner + 简短标签；下方 status line 显示完整 progress 文本
+ * - 失败：红色感叹号；下方 status line 显示错误简述 + "点击查看详情"
+ * - 成功：autoplay+muted+loop 的视频缩略图，hover 显示放大图标；下方 status line 显示"✓ 生成完成"
+ * 整块（视频缩略 + 状态行）均可点击 → 触发 onOpen 弹窗放大
+ */
+function ResultPreview({
+  videoUrl,
+  isGenerating,
+  hasError,
+  error,
+  progress,
+  onOpen,
+}: {
+  videoUrl: string | null;
+  isGenerating: boolean;
+  hasError: boolean;
+  error?: string;
+  progress?: string;
+  onOpen: () => void;
+}) {
+  const proxied = videoUrl ? `/api/video-proxy?url=${encodeURIComponent(videoUrl)}` : '';
+  const interactive = isGenerating || hasError || !!videoUrl;
+
+  const title = videoUrl
+    ? '点击放大播放'
+    : isGenerating
+      ? `点击查看生成进度${progress ? '：' + progress : ''}`
+      : hasError
+        ? '点击查看错误详情'
+        : '生成结果将在此处显示';
+
+  // 下方状态行的文字 / 颜色
+  const statusText = videoUrl
+    ? '✓ 视频已生成 · 点击放大播放'
+    : isGenerating
+      ? progress || '正在生成视频...'
+      : hasError
+        ? `✕ ${error || '生成失败'}`
+        : '生成结果将在此处预览';
+  const statusColor = videoUrl
+    ? 'text-green-300'
+    : isGenerating
+      ? 'text-purple-200'
+      : hasError
+        ? 'text-red-300'
+        : 'text-gray-500';
+
+  return (
+    <div className="w-64 lg:w-80 flex flex-col gap-1.5">
+      <button
+        type="button"
+        onClick={interactive ? onOpen : undefined}
+        disabled={!interactive}
+        title={title}
+        className={`relative w-full aspect-video rounded-lg overflow-hidden border transition-all flex items-center justify-center group ${
+          videoUrl
+            ? 'bg-black border-purple-500/60 shadow-[0_0_0_1px_rgba(168,85,247,0.15)] cursor-zoom-in'
+            : isGenerating
+              ? 'bg-[#1c1f2e] border-purple-500/40 cursor-pointer'
+              : hasError
+                ? 'bg-red-950/30 border-red-500/40 cursor-pointer'
+                : 'bg-[#1c1f2e] border-gray-800 cursor-default'
+        }`}
+      >
+        {videoUrl ? (
+          <>
+            <video
+              src={proxied}
+              muted
+              loop
+              autoPlay
+              playsInline
+              className="w-full h-full object-contain bg-black pointer-events-none"
+            />
+            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center">
+              <svg
+                className="w-9 h-9 text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow-lg"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+              </svg>
+            </div>
+          </>
+        ) : isGenerating ? (
+          <div className="flex flex-col items-center justify-center gap-2 px-4 text-center">
+            <span className="w-7 h-7 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" />
+            <span className="text-xs text-purple-200">正在生成中…</span>
+          </div>
+        ) : hasError ? (
+          <div className="flex flex-col items-center justify-center gap-1.5 text-center px-4">
+            <div className="w-9 h-9 rounded-full bg-red-500/20 border border-red-500/50 flex items-center justify-center text-red-300 font-bold text-lg leading-none">
+              !
+            </div>
+            <span className="text-xs text-red-300">生成失败 · 点击查看</span>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center gap-1.5 opacity-60">
+            <FilmIcon className="w-7 h-7 text-gray-500" />
+            <span className="text-xs text-gray-500">视频结果预览</span>
+          </div>
+        )}
+      </button>
+
+      {/* 状态 / 进度文字行（固定高度避免布局跳动，保留之前"生成过程描述"的体验） */}
+      <button
+        type="button"
+        onClick={interactive ? onOpen : undefined}
+        disabled={!interactive}
+        className={`w-full text-left text-[11px] leading-tight px-2.5 py-1.5 rounded-md border bg-[#1c1f2e] border-gray-800 min-h-[34px] flex items-start gap-1.5 ${
+          interactive ? 'hover:border-purple-500/40 cursor-pointer' : 'cursor-default'
+        }`}
+        title={statusText}
+      >
+        {isGenerating && (
+          <span className="inline-block w-2 h-2 rounded-full bg-purple-400 animate-pulse mt-[3px] flex-shrink-0" />
+        )}
+        <span className={`${statusColor} line-clamp-2 break-words flex-1`}>{statusText}</span>
+      </button>
+    </div>
+  );
+}
+
+/**
  * 单个视频预览 tile：根据视频宽高动态调整外框 aspect。
  * - 已知 width/height：直接用
  * - 未知（旧快照恢复）：先用 16/9，待 <video> onLoadedMetadata 后回调刷新
@@ -882,81 +1009,58 @@ export default function SingleTaskPage() {
       {/* Mobile Header */}
       <div className="md:hidden sticky top-0 z-40 bg-[#0f111a]/95 backdrop-blur-sm px-4 py-3 flex items-center justify-between border-b border-gray-800">
         <h1 className="text-lg font-bold">{MODEL_OPTIONS.find(m => m.value === model)?.label || 'Seedance 2.0'}</h1>
-        <button
-          onClick={() => navigate('/settings')}
-          className="p-2 rounded-lg hover:bg-gray-800 transition-colors"
-        >
-          <GearIcon className="w-5 h-5 text-gray-400" />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setPlayerOpen(true)}
+            disabled={!isGenerating && !videoUrl && generation.status !== 'error'}
+            className={`p-2 rounded-lg transition-colors ${
+              videoUrl
+                ? 'text-purple-300 hover:bg-purple-500/10'
+                : isGenerating
+                  ? 'text-purple-400 hover:bg-purple-500/10'
+                  : generation.status === 'error'
+                    ? 'text-red-400 hover:bg-red-500/10'
+                    : 'text-gray-600 cursor-not-allowed'
+            }`}
+            title="查看视频结果"
+          >
+            <FilmIcon className="w-5 h-5" />
+          </button>
+          <button
+            onClick={() => navigate('/settings')}
+            className="p-2 rounded-lg hover:bg-gray-800 transition-colors"
+          >
+            <GearIcon className="w-5 h-5 text-gray-400" />
+          </button>
+        </div>
       </div>
 
       {/* 主面板 — 配置（右侧 VideoPlayer 已改为弹窗，此处占满整屏） */}
       <div className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 bg-[#0f111a]">
         {/* 内容最大宽度约束，避免在超宽屏上行太长 */}
         <div className="mx-auto w-full max-w-[1400px]">
-        {/* Desktop Header */}
-        <div className="hidden md:flex items-center justify-between mb-6">
-          <h2 className="text-xl font-bold">{MODEL_OPTIONS.find(m => m.value === model)?.label || 'Seedance 2.0'} 视频配置</h2>
-          <button
-            onClick={() => navigate('/settings')}
-            className="p-2 rounded-lg hover:bg-gray-800 transition-colors"
-            title="设置"
-          >
-            <GearIcon className="w-5 h-5 text-gray-400" />
-          </button>
+        {/* Desktop Header：标题 + 右上角小视频预览块 + 齿轮 */}
+        <div className="hidden md:flex items-start justify-between gap-4 mb-4">
+          <h2 className="text-xl font-bold pt-1">{MODEL_OPTIONS.find(m => m.value === model)?.label || 'Seedance 2.0'} 视频配置</h2>
+          <div className="flex items-start gap-3">
+            <ResultPreview
+              videoUrl={videoUrl}
+              isGenerating={isGenerating}
+              hasError={generation.status === 'error'}
+              error={generation.status === 'error' ? generation.error : undefined}
+              progress={generation.progress}
+              onOpen={() => setPlayerOpen(true)}
+            />
+            <button
+              onClick={() => navigate('/settings')}
+              className="p-2 mt-1 rounded-lg hover:bg-gray-800 transition-colors"
+              title="设置"
+            >
+              <GearIcon className="w-5 h-5 text-gray-400" />
+            </button>
+          </div>
         </div>
 
-        {/* 配置管理按钮条 */}
-        <div className="mb-4 flex items-center gap-2">
-          <button
-            onClick={() => setShowPresetPanel(true)}
-            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-[#1c1f2e] hover:bg-[#25293d] border border-gray-800 hover:border-purple-500/40 rounded-lg text-sm text-gray-300 transition-all"
-            title="查看保存的预设和最近提交历史"
-          >
-            <HistoryIcon className="w-4 h-4 text-purple-400" />
-            加载配置
-          </button>
-          <button
-            onClick={handleSavePreset}
-            disabled={isGenerating}
-            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-[#1c1f2e] hover:bg-[#25293d] border border-gray-800 hover:border-purple-500/40 rounded-lg text-sm text-gray-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-            title="把当前配置保存为可复用的预设"
-          >
-            <PackageIcon className="w-4 h-4 text-purple-400" />
-            保存预设
-          </button>
-          <button
-            onClick={() => setPlayerOpen(true)}
-            disabled={!isGenerating && !videoUrl && generation.status !== 'error'}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm transition-all border ${
-              videoUrl
-                ? 'bg-purple-600/20 hover:bg-purple-600/30 border-purple-500/60 text-purple-200'
-                : isGenerating
-                  ? 'bg-[#1c1f2e] hover:bg-[#25293d] border-purple-500/40 text-purple-300'
-                  : generation.status === 'error'
-                    ? 'bg-[#1c1f2e] hover:bg-[#25293d] border-red-500/40 text-red-300'
-                    : 'bg-[#1c1f2e] border-gray-800 text-gray-500 opacity-50 cursor-not-allowed'
-            }`}
-            title={
-              videoUrl
-                ? '查看已生成的视频'
-                : isGenerating
-                  ? '查看生成进度'
-                  : generation.status === 'error'
-                    ? '查看错误详情'
-                    : '暂无视频可查看'
-            }
-          >
-            <FilmIcon className="w-4 h-4" />
-            {isGenerating
-              ? '生成中…'
-              : videoUrl
-                ? '查看视频'
-                : generation.status === 'error'
-                  ? '查看错误'
-                  : '查看视频'}
-          </button>
-        </div>
 
         {/* 草稿恢复横幅 */}
         {draftToRestore && (
@@ -1109,6 +1213,26 @@ export default function SingleTaskPage() {
         <div className="grid gap-5 lg:grid-cols-2 lg:gap-6 items-start">
           {/* 左列：素材输入 + 提示词 */}
           <div className="space-y-5 min-w-0">
+          {/* 配置管理按钮（紧凑：放在左列顶端，而不是横跨整条顶栏） */}
+          <div className="flex items-center gap-2 -mb-1">
+            <button
+              onClick={() => setShowPresetPanel(true)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-[#1c1f2e] hover:bg-[#25293d] border border-gray-800 hover:border-purple-500/40 rounded-md text-xs text-gray-300 transition-all"
+              title="查看保存的预设和最近提交历史"
+            >
+              <HistoryIcon className="w-3.5 h-3.5 text-purple-400" />
+              加载配置
+            </button>
+            <button
+              onClick={handleSavePreset}
+              disabled={isGenerating}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-[#1c1f2e] hover:bg-[#25293d] border border-gray-800 hover:border-purple-500/40 rounded-md text-xs text-gray-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              title="把当前配置保存为可复用的预设"
+            >
+              <PackageIcon className="w-3.5 h-3.5 text-purple-400" />
+              保存预设
+            </button>
+          </div>
           {/* Reference Images */}
           <div>
             <div className="flex justify-between items-center mb-2">

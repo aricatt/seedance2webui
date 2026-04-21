@@ -510,6 +510,7 @@ app.post(
               video_url: result.videoUrl,
               progress: '',
               error_message: null,
+              revised_prompt: result.revisedPrompt || null,
             });
           } catch (dbError) {
             console.error('[生成任务] 更新数据库记录失败:', dbError.message);
@@ -526,7 +527,7 @@ app.post(
           try {
             taskService.updateTaskStatus(dbTaskId, 'error', {
               progress: '',
-              error_message: err.message,
+              error_message: err.message || '视频生成失败',
             });
           } catch (_) {}
         }
@@ -2382,6 +2383,7 @@ function resumePendingArkTasks() {
           item_id: result.itemId || t.submit_id,
           progress: '',
           error_message: null,
+          revised_prompt: result.revisedPrompt || null,
         });
         console.log(`[resume][task ${t.id}] ✅ 恢复完成: ${result.videoUrl}`);
       }).catch((err) => {

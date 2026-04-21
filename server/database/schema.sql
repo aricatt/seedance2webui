@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   started_at DATETIME,
   completed_at DATETIME,
   error_message TEXT,
+  revised_prompt TEXT, -- 方舟模型改写后的提示词（content.revised_prompt）
   retry_count INTEGER DEFAULT 0,
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
   FOREIGN KEY (source_task_id) REFERENCES tasks(id) ON DELETE SET NULL

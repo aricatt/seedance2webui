@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import * as downloadService from '../services/downloadService';
 import type { DownloadTask } from '../types/index';
 import { useToast } from '../components/Toast';
@@ -31,6 +31,10 @@ interface PreviewState {
   url: string;
 }
 
+interface DetailState {
+  task: DownloadTask;
+}
+
 export default function DownloadManagementPage() {
   const { toast, confirm } = useToast();
   const { currentUser } = useApp();
@@ -55,6 +59,20 @@ export default function DownloadManagementPage() {
   const hasInitializedRef = useRef(false);
   const [generatingTasks, setGeneratingTasks] = useState<GeneratingTask[]>([]);
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [detail, setDetail] = useState<DetailState | null>(null);
+
+  // Esc 关闭详情/预览
+  useEffect(() => {
+    if (!detail && !preview) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (detail) setDetail(null);
+        else if (preview) setPreview(null);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [detail, preview]);
 
   const toGeneratingTasks = (items: Array<{ taskId: number; historyId: string; createdAt: string }> = []) =>
     items.map((task) => ({
@@ -586,6 +604,34 @@ export default function DownloadManagementPage() {
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex justify-end gap-2">
+                      {/* 详情按钮：所有任务都可点；失败任务高亮红色，提示有错误信息 */}
+                      <button
+                        onClick={() => setDetail({ task })}
+                        className={`p-1 rounded transition-colors ${
+                          task.effective_download_status === 'failed'
+                            ? 'text-red-400 hover:bg-red-500/10'
+                            : task.revised_prompt
+                              ? 'text-cyan-400 hover:bg-cyan-500/10'
+                              : 'text-gray-400 hover:bg-gray-500/10'
+                        }`}
+                        title={
+                          task.effective_download_status === 'failed'
+                            ? '查看失败原因'
+                            : task.revised_prompt
+                              ? '查看任务详情（含模型改写后的提示词）'
+                              : '查看任务详情'
+                        }
+                      >
+                        {task.effective_download_status === 'failed' ? (
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z" />
+                          </svg>
+                        ) : (
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                        )}
+                      </button>
                       {/* 生成中的任务：显示"继续监听"按钮 */}
                       {task.effective_download_status === 'generating' && task.history_id && (
                         <button
@@ -727,6 +773,134 @@ export default function DownloadManagementPage() {
         </div>
       )}
 
+      {/* 任务详情弹窗：失败原因 / 模型改写后的提示词 / 元数据 */}
+      {detail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          onClick={() => setDetail(null)}
+        >
+          <div
+            className="relative w-full max-w-2xl max-h-[88vh] bg-[#0f111a] rounded-2xl border border-gray-800 shadow-2xl overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-800 flex-shrink-0">
+              <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
+                <svg className="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                任务详情 #{detail.task.id.toString().padStart(6, '0')}
+                <span
+                  className={`ml-2 px-2 py-0.5 rounded text-xs border ${
+                    detail.task.effective_download_status === 'failed'
+                      ? 'bg-red-500/20 text-red-400 border-red-500/30'
+                      : detail.task.effective_download_status === 'done'
+                        ? 'bg-green-500/20 text-green-400 border-green-500/30'
+                        : detail.task.effective_download_status === 'generating'
+                          ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30'
+                          : 'bg-gray-500/20 text-gray-300 border-gray-500/30'
+                  }`}
+                >
+                  {detail.task.effective_download_status === 'generating' && '生成中'}
+                  {detail.task.effective_download_status === 'pending' && '待下载'}
+                  {detail.task.effective_download_status === 'downloading' && '下载中'}
+                  {detail.task.effective_download_status === 'done' && '已下载'}
+                  {detail.task.effective_download_status === 'failed' && '失败'}
+                </span>
+              </div>
+              <button
+                onClick={() => setDetail(null)}
+                className="p-1.5 text-gray-400 hover:bg-gray-800 rounded-lg transition-colors"
+                title="关闭 (Esc)"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-4 text-sm">
+              {/* 失败原因 */}
+              {detail.task.error_message && (
+                <section>
+                  <h3 className="text-xs font-bold text-red-400 uppercase tracking-wider mb-2 flex items-center gap-2">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z" />
+                    </svg>
+                    失败原因
+                  </h3>
+                  <div className="bg-red-900/20 border border-red-700/50 rounded-lg p-3 text-red-200 whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+                    {detail.task.error_message}
+                  </div>
+                  <div className="text-[11px] text-gray-500 mt-1">
+                    错误信息直接来自方舟生成接口，可作为联系客服或重试时的依据
+                  </div>
+                </section>
+              )}
+              {/* 元数据 */}
+              <section>
+                <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">元数据</h3>
+                <div className="bg-[#1c1f2e] border border-gray-800 rounded-lg overflow-hidden text-xs">
+                  <DetailRow label="项目" value={detail.task.project_name || '-'} />
+                  <DetailRow label="创建人" value={detail.task.user_email || '-'} />
+                  <DetailRow label="时长" value={detail.task.duration ? `${detail.task.duration}s` : '-'} />
+                  <DetailRow label="提交时间" value={formatDbTime(detail.task.created_at)} />
+                  {detail.task.completed_at && (
+                    <DetailRow label="完成时间" value={formatDbTime(detail.task.completed_at)} />
+                  )}
+                  {detail.task.history_id && (
+                    <DetailRow label="History ID" value={detail.task.history_id} mono />
+                  )}
+                  {detail.task.video_url && (
+                    <DetailRow
+                      label="视频 URL"
+                      value={
+                        <a
+                          href={detail.task.video_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-purple-400 hover:text-purple-300 break-all"
+                        >
+                          {detail.task.video_url}
+                        </a>
+                      }
+                    />
+                  )}
+                </div>
+              </section>
+              {/* 原始提示词 */}
+              <section>
+                <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">原始提示词</h3>
+                <div className="bg-[#1c1f2e] border border-gray-800 rounded-lg p-3 whitespace-pre-wrap break-words text-gray-200 leading-relaxed">
+                  {detail.task.prompt || <span className="text-gray-600">(空)</span>}
+                </div>
+              </section>
+              {/* 模型改写后的提示词 */}
+              {detail.task.revised_prompt && detail.task.revised_prompt !== detail.task.prompt && (
+                <section>
+                  <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider mb-2 flex items-center gap-2">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                    </svg>
+                    模型改写后的提示词
+                  </h3>
+                  <div className="bg-cyan-900/10 border border-cyan-800/40 rounded-lg p-3 whitespace-pre-wrap break-words text-cyan-100 leading-relaxed">
+                    {detail.task.revised_prompt}
+                  </div>
+                  <div className="text-[11px] text-gray-500 mt-1">
+                    方舟会按内部规则微调提示词以适配模型；这是实际用于生成的最终文本
+                  </div>
+                </section>
+              )}
+              {!detail.task.error_message &&
+                (!detail.task.revised_prompt || detail.task.revised_prompt === detail.task.prompt) && (
+                  <div className="text-xs text-gray-500 text-center py-2">
+                    本任务暂无失败原因或额外的模型改写信息
+                  </div>
+                )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 视频在线预览弹窗 */}
       {preview && (
         <div
@@ -763,6 +937,25 @@ export default function DownloadManagementPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: ReactNode;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex items-start gap-3 px-3 py-2 border-b border-gray-800 last:border-b-0">
+      <div className="w-20 flex-shrink-0 text-gray-500">{label}</div>
+      <div className={`flex-1 min-w-0 text-gray-200 break-words ${mono ? 'font-mono text-[11px]' : ''}`}>
+        {value}
+      </div>
     </div>
   );
 }

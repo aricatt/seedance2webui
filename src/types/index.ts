@@ -427,6 +427,10 @@ export interface DownloadTask {
   duration?: number;
   effective_download_status: DownloadStatus;
   archive_path?: string | null;
+  /** 失败原因（生成失败时由后端写入） */
+  error_message?: string | null;
+  /** 方舟模型改写后的提示词（成功时由后端写入） */
+  revised_prompt?: string | null;
 }
 
 /**

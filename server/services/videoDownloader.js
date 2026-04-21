@@ -303,9 +303,13 @@ export function getDownloadTasks(options = {}) {
 
   if (status !== 'all') {
     if (status === 'generating') {
-      whereClauses.push("(t.status = 'generating' OR (t.history_id IS NOT NULL AND t.video_url IS NULL AND t.status != 'cancelled'))");
+      // 生成中：只在没出错、没取消时算
+      whereClauses.push("(t.status = 'generating' OR (t.history_id IS NOT NULL AND t.video_url IS NULL AND t.status NOT IN ('cancelled', 'error')))");
     } else if (status === 'pending') {
       whereClauses.push("(t.video_url IS NOT NULL AND (t.download_status IS NULL OR t.download_status = 'pending'))");
+    } else if (status === 'failed') {
+      // "失败" 同时包含：任务生成出错(t.status='error') 与 下载失败(t.download_status='failed')
+      whereClauses.push("(t.status = 'error' OR t.download_status = 'failed')");
     } else {
       whereClauses.push('t.download_status = ?');
       params.push(status);
@@ -345,15 +349,18 @@ export function getDownloadTasks(options = {}) {
       t.completed_at,
       t.duration,
       t.archive_path,
+      t.error_message,
+      t.revised_prompt,
       p.name as project_name,
       u.email as user_email,
       CASE
-        WHEN t.status = 'generating' OR (t.history_id IS NOT NULL AND t.video_url IS NULL AND t.status != 'cancelled') THEN 'generating'
+        WHEN t.status = 'error' THEN 'failed'
+        WHEN t.status = 'generating' OR (t.history_id IS NOT NULL AND t.video_url IS NULL AND t.status NOT IN ('cancelled', 'error')) THEN 'generating'
         WHEN t.status = 'done' AND t.video_url IS NOT NULL AND (t.download_status IS NULL OR t.download_status = 'pending') THEN 'pending'
         WHEN t.download_status = 'downloading' THEN 'downloading'
         WHEN t.download_status = 'done' THEN 'done'
         WHEN t.download_status = 'failed' THEN 'failed'
-        ELSE 'failed'
+        ELSE 'pending'
       END as effective_download_status
     FROM tasks t
     LEFT JOIN projects p ON t.project_id = p.id
