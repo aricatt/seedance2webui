@@ -11,6 +11,7 @@ import {
 import type { User } from '../types';
 import { UsersIcon, ShieldIcon, CheckIcon, SparkleIcon } from '../components/Icons';
 import { useToast } from '../components/Toast';
+import { formatDbDate } from '../utils/datetime';
 
 interface SystemStats {
   totalUsers: number;
@@ -354,12 +355,7 @@ export default function AdminPage() {
                         </td>
                         <td className="px-6 py-4 text-sm text-white">{user.credits}</td>
                         <td className="px-6 py-4 text-sm text-gray-400">
-                          {(() => {
-                            const raw = (user as any).created_at || user.createdAt;
-                            if (!raw) return '-';
-                            const d = new Date(raw);
-                            return isNaN(d.getTime()) ? '-' : d.toLocaleDateString('zh-CN');
-                          })()}
+                          {formatDbDate((user as any).created_at || user.createdAt)}
                         </td>
                         <td className="px-6 py-4 text-sm">
                           <div className="flex items-center gap-2">

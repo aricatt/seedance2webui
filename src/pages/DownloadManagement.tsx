@@ -4,6 +4,7 @@ import type { DownloadTask } from '../types/index';
 import { useToast } from '../components/Toast';
 import { useApp } from '../context/AppContext';
 import { getAuthHeaders } from '../services/authService';
+import { formatDbTime } from '../utils/datetime';
 
 interface DownloadState {
   tasks: DownloadTask[];
@@ -563,7 +564,7 @@ export default function DownloadManagementPage() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-400">
-                    {new Date(task.created_at).toLocaleString('zh-CN')}
+                    {formatDbTime(task.created_at)}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex justify-end gap-2">

@@ -237,13 +237,20 @@ function renderAssetCard(entry: CompressedEntry): string {
     </div>`;
 }
 
+/** 把 ISO 时间转成本地可读字符串（带 Z 的 UTC ISO 字符串，本地时区呈现） */
+function toLocalReadable(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString('zh-CN');
+}
+
 function renderMeta(meta: ArchiveMeta): string {
   const row = (k: string, v: string) =>
     `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v)}</td></tr>`;
   return `
     <table class="meta-table">
       ${row('任务 ID', String(meta.taskId))}
-      ${row('提交时间', meta.submittedAt)}
+      ${row('提交时间', toLocalReadable(meta.submittedAt))}
       ${row('模型', meta.model)}
       ${row('画幅比例', meta.ratio)}
       ${row('时长（秒）', String(meta.duration))}
@@ -268,11 +275,21 @@ export function buildArchiveHTML(
 
   const groupBlock = (title: string, items: CompressedEntry[]) => {
     if (items.length === 0) return '';
-    return `<section class="asset-group">
+    return `<div class="asset-group">
         <h3>${escapeHtml(title)}（${items.length}）</h3>
         <div class="asset-grid">${items.map(renderAssetCard).join('')}</div>
-      </section>`;
+      </div>`;
   };
+
+  // 视频 + 音频合并为一排（两者合计不超过 6 个），保留原顺序（视频在前、音频在后）
+  const mediaItems = [...groups.video, ...groups.audio];
+  const mediaBlock =
+    mediaItems.length === 0
+      ? ''
+      : `<div class="asset-group">
+          <h3>参考视频与音频（${mediaItems.length}）</h3>
+          <div class="asset-grid">${mediaItems.map(renderAssetCard).join('')}</div>
+        </div>`;
 
   const promptHtml = renderPromptWithChips(input.prompt || '(无提示词)', byLabel);
   const plainPrompt = input.prompt || '';
@@ -350,7 +367,7 @@ footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #2a2f3e; fon
 <div class="container">
   <header>
     <h1>任务归档 #${input.meta.taskId}</h1>
-    <div class="sub">提交于 ${escapeHtml(input.meta.submittedAt)} · 离线可读 · 此文件由浏览器端生成</div>
+    <div class="sub">提交于 ${escapeHtml(toLocalReadable(input.meta.submittedAt))} · 离线可读 · 此文件由浏览器端生成</div>
   </header>
 
   <section>
@@ -359,18 +376,17 @@ footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #2a2f3e; fon
   </section>
 
   <section>
+    <h2>输入素材</h2>
+    ${groupBlock('参考图片', groups.image)}
+    ${mediaBlock}
+    ${compressed.length === 0 ? '<div style="color:#6b7280;font-size:12px;">（本次任务没有附带任何素材）</div>' : ''}
+  </section>
+
+  <section>
     <h2>提示词（含素材引用）</h2>
     <div class="prompt-box">${promptHtml}</div>
     <h3>原始纯文本</h3>
     <div class="plain-prompt">${escapeHtml(plainPrompt)}</div>
-  </section>
-
-  <section>
-    <h2>输入素材</h2>
-    ${groupBlock('参考图片', groups.image)}
-    ${groupBlock('参考视频（首帧）', groups.video)}
-    ${groupBlock('参考音频', groups.audio)}
-    ${compressed.length === 0 ? '<div style="color:#6b7280;font-size:12px;">（本次任务没有附带任何素材）</div>' : ''}
   </section>
 
   <footer>
