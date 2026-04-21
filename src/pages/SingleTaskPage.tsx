@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useMemo } from 'react';
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import { PromptEditor, AssetStrip, type AssetItem, type PromptEditorHandle } from '../components/PromptEditor';
 import type {
   AspectRatio,
@@ -11,7 +11,17 @@ import { RATIO_OPTIONS, DURATION_OPTIONS, MODEL_OPTIONS } from '../types/index';
 import { generateVideo } from '../services/videoService';
 import { archiveTask } from '../services/archiveService';
 import VideoPlayer from '../components/VideoPlayer';
-import { GearIcon, PlusIcon, CloseIcon, SparkleIcon } from '../components/Icons';
+import PresetPanel from '../components/PresetPanel';
+import { useToast } from '../components/Toast';
+import {
+  GearIcon,
+  PlusIcon,
+  CloseIcon,
+  SparkleIcon,
+  HistoryIcon,
+  PackageIcon,
+  CheckIcon,
+} from '../components/Icons';
 import { useNavigate } from 'react-router-dom';
 import { getAuthSessionId } from '../services/authService';
 import {
@@ -22,6 +32,18 @@ import {
   validateImageCount,
   validateMediaGroup,
 } from '../utils/arkFileLimits';
+import {
+  fileToAssetSnapshot,
+  savePreset,
+  pushHistory,
+  saveDraft,
+  loadDraft,
+  clearDraft,
+  isSnapshotEmpty,
+  matchesSnapshot,
+  type ConfigSnapshot,
+  type AssetSnapshot,
+} from '../services/configPresetService';
 
 let nextId = 0;
 
@@ -67,6 +89,20 @@ export default function SingleTaskPage() {
   const aiAbortRef = useRef<AbortController | null>(null);
   const promptEditorRef = useRef<PromptEditorHandle>(null);
 
+  // 配置预设相关
+  const { toast } = useToast();
+  const [showPresetPanel, setShowPresetPanel] = useState(false);
+  const [presetReloadToken, setPresetReloadToken] = useState(0);
+  /** 从预设/历史加载后待补全的素材清单（按原 kind 分组，按 label 顺序） */
+  const [pending, setPending] = useState<{
+    images: AssetSnapshot[];
+    videos: AssetSnapshot[];
+    audios: AssetSnapshot[];
+  } | null>(null);
+  /** 未提交的 draft 快照：挂载时询问是否恢复 */
+  const [draftToRestore, setDraftToRestore] = useState<ConfigSnapshot | null>(null);
+  const [draftRestoreTs, setDraftRestoreTs] = useState<number | null>(null);
+
   // 弹窗顶部素材条 & 编辑器需要的统一 AssetItem 列表
   const modalAssets = useMemo<AssetItem[]>(() => {
     const items: AssetItem[] = [];
@@ -95,6 +131,223 @@ export default function SingleTaskPage() {
     });
     return items;
   }, [images, videoItems, audioItems]);
+
+  // ==========================================================
+  // Pending 匹配：看哪些期望素材已经被用户重新选择补齐
+  // ==========================================================
+  const pendingMatches = useMemo(() => {
+    if (!pending) return null;
+    const imageHit = pending.images.map((snap) =>
+      images.some((img) => matchesSnapshot(img.file, snap)),
+    );
+    const videoHit = pending.videos.map((snap) =>
+      videoItems.some((v) => matchesSnapshot(v.file, snap)),
+    );
+    const audioHit = pending.audios.map((snap) =>
+      audioItems.some((a) => matchesSnapshot(a.file, snap)),
+    );
+    const totalExpected =
+      pending.images.length + pending.videos.length + pending.audios.length;
+    const totalHit =
+      imageHit.filter(Boolean).length +
+      videoHit.filter(Boolean).length +
+      audioHit.filter(Boolean).length;
+    return { imageHit, videoHit, audioHit, totalExpected, totalHit };
+  }, [pending, images, videoItems, audioItems]);
+
+  // ==========================================================
+  // 当前配置 → ConfigSnapshot（异步，需要生成缩略图）
+  // ==========================================================
+  const buildCurrentSnapshot = useCallback(async (): Promise<ConfigSnapshot> => {
+    const imageSnaps = await Promise.all(
+      images.map((img) =>
+        fileToAssetSnapshot(img.file, 'image', { label: `图${img.index}` }),
+      ),
+    );
+    const videoSnaps = await Promise.all(
+      videoItems.map((v, i) =>
+        fileToAssetSnapshot(v.file, 'video', {
+          label: `视频${i + 1}`,
+          durationSeconds: v.duration,
+        }),
+      ),
+    );
+    const audioSnaps = await Promise.all(
+      audioItems.map((a, i) =>
+        fileToAssetSnapshot(a.file, 'audio', {
+          label: `音频${i + 1}`,
+          durationSeconds: a.duration,
+        }),
+      ),
+    );
+    return {
+      prompt,
+      model,
+      ratio,
+      duration,
+      images: imageSnaps,
+      videos: videoSnaps,
+      audios: audioSnaps,
+    };
+  }, [prompt, model, ratio, duration, images, videoItems, audioItems]);
+
+  // ==========================================================
+  // 加载一个快照回填到 UI：清空现有素材 + 恢复参数 + 设置 pending
+  // ==========================================================
+  const applySnapshot = useCallback(
+    (snap: ConfigSnapshot) => {
+      // 清理现有素材 URL
+      images.forEach((img) => URL.revokeObjectURL(img.previewUrl));
+      videoItems.forEach((v) => URL.revokeObjectURL(v.previewUrl));
+      setImages([]);
+      setVideoItems([]);
+      setAudioItems([]);
+      setUploadError('');
+      setUploadWarning('');
+
+      // 恢复文本/参数
+      setPrompt(snap.prompt || '');
+      if (snap.model) setModel(snap.model as ModelId);
+      if (snap.ratio) setRatio(snap.ratio as AspectRatio);
+      if (typeof snap.duration === 'number') setDuration(snap.duration as Duration);
+
+      // 配置待补全素材清单
+      const hasAssets =
+        snap.images.length > 0 || snap.videos.length > 0 || snap.audios.length > 0;
+      setPending(
+        hasAssets
+          ? {
+              images: snap.images.slice(),
+              videos: snap.videos.slice(),
+              audios: snap.audios.slice(),
+            }
+          : null,
+      );
+      setGeneration({ status: 'idle' });
+      setDraftToRestore(null);
+      setDraftRestoreTs(null);
+    },
+    [images, videoItems],
+  );
+
+  // ==========================================================
+  // 挂载时尝试恢复上次未提交的 draft
+  // ==========================================================
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const entry = await loadDraft();
+        if (cancelled || !entry) return;
+        if (isSnapshotEmpty(entry.snapshot)) {
+          void clearDraft();
+          return;
+        }
+        // 只在完全"空白状态"时才提示恢复，避免覆盖用户正在编辑的内容
+        setDraftToRestore(entry.snapshot);
+        setDraftRestoreTs(entry.createdAt);
+      } catch (e) {
+        console.warn('[preset] 加载 draft 失败', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // 只在首次挂载运行
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ==========================================================
+  // 离开页面前把当前状态存为 draft（若非空）
+  // ==========================================================
+  useEffect(() => {
+    const handler = () => {
+      const hasAnything =
+        prompt.trim() ||
+        images.length > 0 ||
+        videoItems.length > 0 ||
+        audioItems.length > 0;
+      if (!hasAnything) {
+        void clearDraft();
+        return;
+      }
+      // 同步路径里没法 await 缩略图生成：这里存"轻量"版本，只有元数据
+      const toLiteSnap = (file: File, kind: 'image' | 'video' | 'audio', label: string, durationSeconds?: number): AssetSnapshot => ({
+        kind,
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        lastModified: file.lastModified,
+        label,
+        durationSeconds,
+      });
+      const snap: ConfigSnapshot = {
+        prompt,
+        model,
+        ratio,
+        duration,
+        images: images.map((img) => toLiteSnap(img.file, 'image', `图${img.index}`)),
+        videos: videoItems.map((v, i) =>
+          toLiteSnap(v.file, 'video', `视频${i + 1}`, v.duration),
+        ),
+        audios: audioItems.map((a, i) =>
+          toLiteSnap(a.file, 'audio', `音频${i + 1}`, a.duration),
+        ),
+      };
+      void saveDraft(snap);
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => {
+      window.removeEventListener('beforeunload', handler);
+    };
+  }, [prompt, model, ratio, duration, images, videoItems, audioItems]);
+
+  // ==========================================================
+  // 手动保存为预设
+  // ==========================================================
+  const handleSavePreset = useCallback(async () => {
+    const hasAnything =
+      prompt.trim() ||
+      images.length > 0 ||
+      videoItems.length > 0 ||
+      audioItems.length > 0;
+    if (!hasAnything) {
+      toast.warning('当前配置为空，无需保存');
+      return;
+    }
+    const defaultName = `预设 ${new Date().toLocaleString('zh-CN', { hour12: false })}`;
+    const name = window.prompt('请输入预设名称：', defaultName);
+    if (name === null) return;
+    const trimmed = name.trim();
+    if (!trimmed) {
+      toast.warning('名称不能为空');
+      return;
+    }
+    try {
+      const snap = await buildCurrentSnapshot();
+      await savePreset(trimmed, snap);
+      setPresetReloadToken((n) => n + 1);
+      toast.success('已保存为预设');
+    } catch (e) {
+      console.error('[preset] 保存预设失败', e);
+      toast.error('保存失败：' + (e instanceof Error ? e.message : '未知错误'));
+    }
+  }, [prompt, images, videoItems, audioItems, buildCurrentSnapshot, toast]);
+
+  const dismissPending = useCallback(() => setPending(null), []);
+  const dismissDraftRestore = useCallback(() => {
+    setDraftToRestore(null);
+    setDraftRestoreTs(null);
+    void clearDraft();
+  }, []);
+  const doRestoreDraft = useCallback(() => {
+    if (!draftToRestore) return;
+    applySnapshot(draftToRestore);
+    setDraftToRestore(null);
+    setDraftRestoreTs(null);
+    void clearDraft();
+    toast.success('已恢复上次未提交的配置');
+  }, [draftToRestore, applySnapshot, toast]);
 
   // ==========================================================
   // 图片: 异步逐张校验, 失败的跳过并记录原因
@@ -334,6 +587,19 @@ export default function SingleTaskPage() {
               duration,
             },
           });
+          // 提交成功 → 把当前配置写入"最近历史"，并清掉 draft
+          void (async () => {
+            try {
+              const snap = await buildCurrentSnapshot();
+              if (!isSnapshotEmpty(snap)) {
+                await pushHistory(snap);
+                setPresetReloadToken((n) => n + 1);
+              }
+              await clearDraft();
+            } catch (e) {
+              console.warn('[preset] 写入历史失败（不影响主流程）', e);
+            }
+          })();
         },
       );
 
@@ -351,7 +617,7 @@ export default function SingleTaskPage() {
         error: error instanceof Error ? error.message : '未知错误',
       });
     }
-  }, [prompt, images, videoItems, audioItems, model, ratio, duration, generation.status]);
+  }, [prompt, images, videoItems, audioItems, model, ratio, duration, generation.status, buildCurrentSnapshot]);
 
   const handleReset = () => {
     setPrompt('');
@@ -360,6 +626,7 @@ export default function SingleTaskPage() {
     setUploadError('');
     setUploadWarning('');
     setGeneration({ status: 'idle' });
+    setPending(null);
   };
 
   const videoUrl =
@@ -406,6 +673,175 @@ export default function SingleTaskPage() {
             <GearIcon className="w-5 h-5 text-gray-400" />
           </button>
         </div>
+
+        {/* 配置管理按钮条 */}
+        <div className="mb-4 flex items-center gap-2">
+          <button
+            onClick={() => setShowPresetPanel(true)}
+            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-[#1c1f2e] hover:bg-[#25293d] border border-gray-800 hover:border-purple-500/40 rounded-lg text-sm text-gray-300 transition-all"
+            title="查看保存的预设和最近提交历史"
+          >
+            <HistoryIcon className="w-4 h-4 text-purple-400" />
+            加载配置
+          </button>
+          <button
+            onClick={handleSavePreset}
+            disabled={isGenerating}
+            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-[#1c1f2e] hover:bg-[#25293d] border border-gray-800 hover:border-purple-500/40 rounded-lg text-sm text-gray-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            title="把当前配置保存为可复用的预设"
+          >
+            <PackageIcon className="w-4 h-4 text-purple-400" />
+            保存预设
+          </button>
+        </div>
+
+        {/* 草稿恢复横幅 */}
+        {draftToRestore && (
+          <div className="mb-4 bg-indigo-900/30 border border-indigo-700/60 rounded-xl px-3 py-2.5 flex items-start gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-medium text-indigo-200">
+                发现上次未提交的配置
+                {draftRestoreTs && (
+                  <span className="text-gray-400 font-normal ml-1">
+                    · {new Date(draftRestoreTs).toLocaleString('zh-CN', { hour12: false })}
+                  </span>
+                )}
+              </div>
+              <div className="text-[11px] text-gray-400 mt-0.5 truncate">
+                恢复后会覆盖当前所有参数与素材条目（素材本体仍需重新选择）
+              </div>
+            </div>
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <button
+                onClick={doRestoreDraft}
+                className="px-3 py-1 bg-indigo-500/30 hover:bg-indigo-500/50 text-indigo-100 rounded-md text-xs font-medium transition-colors"
+              >
+                恢复
+              </button>
+              <button
+                onClick={dismissDraftRestore}
+                className="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-md text-xs transition-colors"
+                title="忽略"
+              >
+                <CloseIcon className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* 待补全素材横幅 */}
+        {pending && pendingMatches && pendingMatches.totalExpected > 0 && (
+          <div className="mb-4 bg-amber-900/20 border border-amber-700/50 rounded-xl px-3 py-3">
+            <div className="flex items-start justify-between gap-3 mb-2">
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-amber-200">
+                  配置已恢复 · 待补全素材 {pendingMatches.totalHit}/{pendingMatches.totalExpected}
+                </div>
+                <div className="text-[11px] text-gray-400 mt-0.5">
+                  浏览器安全限制无法自动读取本地文件；请按相同顺序重新选择以下素材，系统会按文件名+大小自动识别并标记已补全
+                </div>
+              </div>
+              <button
+                onClick={dismissPending}
+                className="flex-shrink-0 px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-md text-xs transition-colors"
+                title="关闭提示"
+              >
+                <CloseIcon className="w-3 h-3" />
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {pending.images.map((snap, i) => {
+                const hit = pendingMatches.imageHit[i];
+                return (
+                  <div
+                    key={`p-img-${i}`}
+                    className={`flex items-center gap-1.5 bg-[#1c1f2e] border rounded-md px-2 py-1 transition-opacity ${
+                      hit ? 'border-green-600/60 opacity-60' : 'border-amber-600/40'
+                    }`}
+                    title={`${snap.name}  (${(snap.size / 1024 / 1024).toFixed(2)} MB)`}
+                  >
+                    {snap.thumbDataUrl ? (
+                      <img
+                        src={snap.thumbDataUrl}
+                        alt={snap.name}
+                        className={`w-6 h-6 object-cover rounded-sm ${hit ? '' : 'ring-1 ring-amber-500/40'}`}
+                      />
+                    ) : (
+                      <div className="w-6 h-6 bg-gray-800 rounded-sm" />
+                    )}
+                    <span className="text-[11px] text-purple-300 font-medium">
+                      {snap.label || `图${i + 1}`}
+                    </span>
+                    <span className="text-[11px] text-gray-400 max-w-[120px] truncate">
+                      {snap.name}
+                    </span>
+                    {hit && <CheckIcon className="w-3 h-3 text-green-400 flex-shrink-0" />}
+                  </div>
+                );
+              })}
+              {pending.videos.map((snap, i) => {
+                const hit = pendingMatches.videoHit[i];
+                return (
+                  <div
+                    key={`p-vid-${i}`}
+                    className={`flex items-center gap-1.5 bg-[#1c1f2e] border rounded-md px-2 py-1 transition-opacity ${
+                      hit ? 'border-green-600/60 opacity-60' : 'border-cyan-600/40'
+                    }`}
+                    title={`${snap.name}  (${(snap.size / 1024 / 1024).toFixed(2)} MB${
+                      snap.durationSeconds ? `, ${snap.durationSeconds.toFixed(1)}s` : ''
+                    })`}
+                  >
+                    {snap.thumbDataUrl ? (
+                      <img
+                        src={snap.thumbDataUrl}
+                        alt={snap.name}
+                        className="w-6 h-6 object-cover rounded-sm"
+                      />
+                    ) : (
+                      <div className="w-6 h-6 bg-gray-800 rounded-sm" />
+                    )}
+                    <span className="text-[11px] text-cyan-300 font-medium">
+                      {snap.label || `视频${i + 1}`}
+                    </span>
+                    <span className="text-[11px] text-gray-400 max-w-[120px] truncate">
+                      {snap.name}
+                    </span>
+                    {hit && <CheckIcon className="w-3 h-3 text-green-400 flex-shrink-0" />}
+                  </div>
+                );
+              })}
+              {pending.audios.map((snap, i) => {
+                const hit = pendingMatches.audioHit[i];
+                return (
+                  <div
+                    key={`p-aud-${i}`}
+                    className={`flex items-center gap-1.5 bg-[#1c1f2e] border rounded-md px-2 py-1 transition-opacity ${
+                      hit ? 'border-green-600/60 opacity-60' : 'border-blue-600/40'
+                    }`}
+                    title={`${snap.name}  (${(snap.size / 1024 / 1024).toFixed(2)} MB${
+                      snap.durationSeconds ? `, ${snap.durationSeconds.toFixed(1)}s` : ''
+                    })`}
+                  >
+                    <span className="w-6 h-6 bg-gray-800 rounded-sm flex items-center justify-center text-blue-300 text-xs">♪</span>
+                    <span className="text-[11px] text-blue-300 font-medium">
+                      {snap.label || `音频${i + 1}`}
+                    </span>
+                    <span className="text-[11px] text-gray-400 max-w-[120px] truncate">
+                      {snap.name}
+                    </span>
+                    {hit && <CheckIcon className="w-3 h-3 text-green-400 flex-shrink-0" />}
+                  </div>
+                );
+              })}
+            </div>
+            {pendingMatches.totalHit === pendingMatches.totalExpected && (
+              <div className="mt-2 text-[11px] text-green-400 flex items-center gap-1">
+                <CheckIcon className="w-3 h-3" />
+                全部素材已补全
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="space-y-5">
           {/* Reference Images */}
@@ -1034,6 +1470,14 @@ export default function SingleTaskPage() {
           </div>
         </div>
       )}
+
+      {/* 配置预设 / 历史 面板 */}
+      <PresetPanel
+        open={showPresetPanel}
+        onClose={() => setShowPresetPanel(false)}
+        onLoad={applySnapshot}
+        reloadToken={presetReloadToken}
+      />
     </div>
   );
 }
