@@ -159,13 +159,14 @@ function ResultPreview({
         : 'text-gray-500';
 
   return (
-    <div className="w-64 lg:w-80 flex flex-col gap-1.5">
+    <div className="w-full h-full flex flex-col gap-2 min-h-0">
+      {/* 预览画面：撑满父容器剩余空间 */}
       <button
         type="button"
         onClick={interactive ? onOpen : undefined}
         disabled={!interactive}
         title={title}
-        className={`relative w-full aspect-video rounded-lg overflow-hidden border transition-all flex items-center justify-center group ${
+        className={`relative w-full flex-1 min-h-[260px] rounded-xl overflow-hidden border transition-all flex items-center justify-center group ${
           videoUrl
             ? 'bg-black border-purple-500/60 shadow-[0_0_0_1px_rgba(168,85,247,0.15)] cursor-zoom-in'
             : isGenerating
@@ -187,7 +188,7 @@ function ResultPreview({
             />
             <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center">
               <svg
-                className="w-9 h-9 text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow-lg"
+                className="w-12 h-12 text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow-lg"
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
@@ -197,37 +198,37 @@ function ResultPreview({
             </div>
           </>
         ) : isGenerating ? (
-          <div className="flex flex-col items-center justify-center gap-2 px-4 text-center">
-            <span className="w-7 h-7 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" />
-            <span className="text-xs text-purple-200">正在生成中…</span>
+          <div className="flex flex-col items-center justify-center gap-3 px-6 text-center">
+            <span className="w-12 h-12 border-[3px] border-purple-400 border-t-transparent rounded-full animate-spin" />
+            <span className="text-sm text-purple-200">正在生成中…</span>
           </div>
         ) : hasError ? (
-          <div className="flex flex-col items-center justify-center gap-1.5 text-center px-4">
-            <div className="w-9 h-9 rounded-full bg-red-500/20 border border-red-500/50 flex items-center justify-center text-red-300 font-bold text-lg leading-none">
+          <div className="flex flex-col items-center justify-center gap-2 text-center px-6">
+            <div className="w-14 h-14 rounded-full bg-red-500/20 border border-red-500/50 flex items-center justify-center text-red-300 font-bold text-2xl leading-none">
               !
             </div>
-            <span className="text-xs text-red-300">生成失败 · 点击查看</span>
+            <span className="text-sm text-red-300">生成失败 · 点击查看</span>
           </div>
         ) : (
-          <div className="flex flex-col items-center justify-center gap-1.5 opacity-60">
-            <FilmIcon className="w-7 h-7 text-gray-500" />
-            <span className="text-xs text-gray-500">视频结果预览</span>
+          <div className="flex flex-col items-center justify-center gap-2 opacity-60">
+            <FilmIcon className="w-12 h-12 text-gray-500" />
+            <span className="text-sm text-gray-500">视频结果预览</span>
           </div>
         )}
       </button>
 
-      {/* 状态 / 进度文字行（固定高度避免布局跳动，保留之前"生成过程描述"的体验） */}
+      {/* 状态 / 进度文字行（保留之前"生成过程描述"的体验） */}
       <button
         type="button"
         onClick={interactive ? onOpen : undefined}
         disabled={!interactive}
-        className={`w-full text-left text-[11px] leading-tight px-2.5 py-1.5 rounded-md border bg-[#1c1f2e] border-gray-800 min-h-[34px] flex items-start gap-1.5 ${
+        className={`w-full text-left text-xs leading-snug px-3 py-2 rounded-md border bg-[#1c1f2e] border-gray-800 min-h-[40px] flex items-start gap-2 flex-shrink-0 ${
           interactive ? 'hover:border-purple-500/40 cursor-pointer' : 'cursor-default'
         }`}
         title={statusText}
       >
         {isGenerating && (
-          <span className="inline-block w-2 h-2 rounded-full bg-purple-400 animate-pulse mt-[3px] flex-shrink-0" />
+          <span className="inline-block w-2 h-2 rounded-full bg-purple-400 animate-pulse mt-[5px] flex-shrink-0" />
         )}
         <span className={`${statusColor} line-clamp-2 break-words flex-1`}>{statusText}</span>
       </button>
@@ -236,9 +237,10 @@ function ResultPreview({
 }
 
 /**
- * 单个视频预览 tile：根据视频宽高动态调整外框 aspect。
- * - 已知 width/height：直接用
- * - 未知（旧快照恢复）：先用 16/9，待 <video> onLoadedMetadata 后回调刷新
+ * 单个视频预览 tile：与参考图片一致的 80×80 方块。
+ * - 用 muted/autoPlay/loop 做静音循环缩略，方便识别视频内容
+ * - 左下角小标签显示时长，hover 出现移除按钮
+ * - 仍保留 onLoadedMetadata 回填原始宽高（用于后续接口与草稿恢复）
  */
 function VideoTile({
   item,
@@ -250,21 +252,19 @@ function VideoTile({
   onUpdateDims: (width: number, height: number) => void;
 }) {
   const hasDims = item.width > 0 && item.height > 0;
-  const aspect = hasDims ? item.width / item.height : 16 / 9;
-  // 视觉上以固定高度 116px 为基线，按 aspect 计算 tile 宽度；并对极端比例夹断。
-  const videoHeight = 116;
-  const videoWidth = Math.max(84, Math.min(260, Math.round(videoHeight * aspect)));
   return (
     <div
-      className="relative bg-[#1c1f2e] rounded-xl border border-gray-700 p-1.5 flex flex-col flex-shrink-0"
-      style={{ width: videoWidth + 12 }}
-      title={item.file.name}
+      className="relative group w-20 h-20 flex-shrink-0"
+      title={`${item.file.name} · ${item.duration.toFixed(1)}s · ${(item.file.size / 1024 / 1024).toFixed(1)} MB`}
     >
       <video
         src={item.previewUrl}
-        controls
-        className="rounded-lg bg-black"
-        style={{ width: videoWidth, height: videoHeight, objectFit: 'contain' }}
+        muted
+        autoPlay
+        loop
+        playsInline
+        preload="metadata"
+        className="w-full h-full object-cover rounded-xl border border-gray-700 bg-black"
         onLoadedMetadata={(e) => {
           const el = e.currentTarget;
           if (el.videoWidth > 0 && el.videoHeight > 0 && !hasDims) {
@@ -272,12 +272,12 @@ function VideoTile({
           }
         }}
       />
-      <div className="text-[10px] text-gray-500 mt-1 text-center">
-        {item.duration.toFixed(1)}s · {(item.file.size / 1024 / 1024).toFixed(1)} MB
-      </div>
+      <span className="absolute bottom-0 left-0 bg-black/70 text-[10px] text-cyan-300 px-1.5 py-0.5 rounded-br-xl rounded-tl-xl font-medium tabular-nums">
+        {item.duration.toFixed(1)}s
+      </span>
       <button
         onClick={onRemove}
-        className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-gray-800 border border-gray-700 rounded-full flex items-center justify-center hover:bg-red-600 hover:border-red-600"
+        className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-gray-800 border border-gray-700 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600 hover:border-red-600"
         title="移除"
       >
         <CloseIcon className="w-3 h-3 text-white" />
@@ -1039,26 +1039,16 @@ export default function SingleTaskPage() {
       <div className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 bg-[#0f111a]">
         {/* 内容最大宽度约束，避免在超宽屏上行太长 */}
         <div className="mx-auto w-full max-w-[1400px]">
-        {/* Desktop Header：标题 + 右上角小视频预览块 + 齿轮 */}
-        <div className="hidden md:flex items-start justify-between gap-4 mb-4">
-          <h2 className="text-xl font-bold pt-1">{MODEL_OPTIONS.find(m => m.value === model)?.label || 'Seedance 2.0'} 视频配置</h2>
-          <div className="flex items-start gap-3">
-            <ResultPreview
-              videoUrl={videoUrl}
-              isGenerating={isGenerating}
-              hasError={generation.status === 'error'}
-              error={generation.status === 'error' ? generation.error : undefined}
-              progress={generation.progress}
-              onOpen={() => setPlayerOpen(true)}
-            />
-            <button
-              onClick={() => navigate('/settings')}
-              className="p-2 mt-1 rounded-lg hover:bg-gray-800 transition-colors"
-              title="设置"
-            >
-              <GearIcon className="w-5 h-5 text-gray-400" />
-            </button>
-          </div>
+        {/* Desktop Header：仅标题 + 齿轮（视频预览已搬至右列大块区域） */}
+        <div className="hidden md:flex items-center justify-between gap-4 mb-4">
+          <h2 className="text-xl font-bold">{MODEL_OPTIONS.find(m => m.value === model)?.label || 'Seedance 2.0'} 视频配置</h2>
+          <button
+            onClick={() => navigate('/settings')}
+            className="p-2 rounded-lg hover:bg-gray-800 transition-colors"
+            title="设置"
+          >
+            <GearIcon className="w-5 h-5 text-gray-400" />
+          </button>
         </div>
 
 
@@ -1210,8 +1200,8 @@ export default function SingleTaskPage() {
           </div>
         )}
 
-        <div className="grid gap-5 lg:grid-cols-2 lg:gap-6 items-start">
-          {/* 左列：素材输入 + 提示词 */}
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(380px,520px)] lg:gap-6 items-start">
+          {/* 左列：全部输入 + 参数配置（提示词下方即 Settings） */}
           <div className="space-y-5 min-w-0">
           {/* 配置管理按钮（紧凑：放在左列顶端，而不是横跨整条顶栏） */}
           <div className="flex items-center gap-2 -mb-1">
@@ -1330,6 +1320,8 @@ export default function SingleTaskPage() {
             </div>
           )}
 
+          {/* 参考视频 + 参考音频：并排两列 */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {/* Reference Videos (optional, 最多 maxVideos 段, 总 <=15s) */}
           <div>
             <div className="flex justify-between items-center mb-2">
@@ -1376,12 +1368,13 @@ export default function SingleTaskPage() {
                 <button
                   type="button"
                   onClick={() => videoInputRef.current?.click()}
-                  className="flex-shrink-0 border border-dashed border-gray-700 rounded-xl flex flex-col items-center justify-center bg-[#1c1f2e] cursor-pointer hover:border-purple-500/50 transition-all text-xs text-gray-500 px-4"
-                  style={{ minWidth: 140, height: 116 }}
+                  className="w-20 h-20 flex-shrink-0 border border-dashed border-gray-700 rounded-xl flex flex-col items-center justify-center bg-[#1c1f2e] cursor-pointer hover:border-purple-500/50 hover:bg-[#25293d] transition-all text-gray-500"
                   title="点击上传参考视频 (mp4/mov · 单段 2-15s, ≤50MB)"
                 >
-                  <PlusIcon className="w-5 h-5 mb-1" />
-                  {videoItems.length === 0 ? '添加视频' : `${videoItems.length}/${maxVideos}`}
+                  <PlusIcon className="w-5 h-5" />
+                  <span className="text-[10px] mt-1">
+                    {videoItems.length === 0 ? '添加视频' : `${videoItems.length}/${maxVideos}`}
+                  </span>
                 </button>
               )}
             </div>
@@ -1471,10 +1464,11 @@ export default function SingleTaskPage() {
               }}
             />
           </div>
+          </div>
 
           {/* Prompt */}
           <div
-            className="bg-[#1c1f2e] rounded-2xl p-4 border border-gray-800 cursor-pointer hover:border-purple-500/40 transition-all group"
+            className="bg-[#1c1f2e] rounded-2xl p-3 border border-gray-800 cursor-pointer hover:border-purple-500/40 transition-all group"
             onClick={() => {
               if (!isGenerating) {
                 setModalPrompt(prompt);
@@ -1483,49 +1477,47 @@ export default function SingleTaskPage() {
               }
             }}
           >
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-1.5">
               <label className="block text-sm font-bold text-gray-300">
                 提示词
               </label>
               <span className="text-xs text-purple-400 opacity-0 group-hover:opacity-100 transition-opacity">点击展开编辑</span>
             </div>
-            <div className="w-full bg-transparent text-sm min-h-[80px] max-h-[120px] overflow-hidden text-gray-200 leading-relaxed whitespace-pre-wrap">
+            <div className="w-full bg-transparent text-sm min-h-[40px] max-h-[60px] overflow-hidden text-gray-200 leading-snug whitespace-pre-wrap">
               {prompt || <span className="text-gray-600">点击此处编辑提示词...</span>}
             </div>
-            <div className="text-right text-xs text-gray-500 mt-2">
+            <div className="text-right text-[10px] text-gray-500 mt-1">
               {prompt.length}/5000
             </div>
           </div>
-          </div>
-          {/* 右列：视频参数 + 生成按钮 */}
-          <div className="space-y-5 min-w-0">
-          {/* Settings */}
-          <div className="bg-[#1c1f2e] rounded-2xl p-4 border border-gray-800 space-y-4">
+
+          {/* Seedance 参数配置（紧接提示词下方，同属左列） */}
+          <div className="bg-[#1c1f2e] rounded-2xl p-3 border border-gray-800 space-y-2.5">
             {/* 模型（紧凑：两个选项水平并列） */}
             <div>
-              <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
+              <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-1.5">
                 选择模型
               </label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-1.5">
                 {MODEL_OPTIONS.map((opt) => (
                   <button
                     key={opt.value}
                     onClick={() => setModel(opt.value)}
                     title={opt.description}
-                    className={`text-left px-3 py-2 rounded-lg border transition-all ${
+                    className={`text-left px-2.5 py-1.5 rounded-lg border transition-all ${
                       model === opt.value
                         ? 'border-purple-500 bg-purple-500/10'
                         : 'border-gray-700 bg-[#161824] hover:border-gray-600'
                     }`}
                   >
                     <div
-                      className={`text-xs font-medium truncate ${
+                      className={`text-xs font-medium truncate leading-tight ${
                         model === opt.value ? 'text-purple-400' : 'text-gray-300'
                       }`}
                     >
                       {opt.label}
                     </div>
-                    <div className="text-[10px] text-gray-500 mt-0.5 line-clamp-1">
+                    <div className="text-[10px] text-gray-500 mt-0 line-clamp-1 leading-tight">
                       {opt.value === 'doubao-seedance-2-0-260128'
                         ? '画质更好'
                         : '更快，适合批量出稿'}
@@ -1537,14 +1529,14 @@ export default function SingleTaskPage() {
 
             {/* 画面比例（7 个按钮，一行 flex-wrap） */}
             <div>
-              <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
+              <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-1.5">
                 画面比例
               </label>
-              <div className="grid grid-cols-7 gap-1.5">
+              <div className="grid grid-cols-7 gap-1">
                 {RATIO_OPTIONS.map((opt) => {
                   const isSelected = opt.value === ratio;
                   const isAdaptive = opt.value === 'adaptive';
-                  const maxDim = 22;
+                  const maxDim = 18;
                   let w = 0,
                     h = 0;
                   if (!isAdaptive) {
@@ -1557,13 +1549,13 @@ export default function SingleTaskPage() {
                       key={opt.value}
                       onClick={() => setRatio(opt.value)}
                       title={isAdaptive ? '自适应：由模型根据素材自动决定比例' : opt.label}
-                      className={`flex flex-col items-center gap-1 py-1.5 rounded-lg border transition-all ${
+                      className={`flex flex-col items-center gap-0.5 py-1 rounded-lg border transition-all ${
                         isSelected
                           ? 'border-purple-500 bg-purple-500/10'
                           : 'border-gray-700 bg-[#161824] hover:border-gray-600'
                       }`}
                     >
-                      <div className="flex items-center justify-center w-6 h-6">
+                      <div className="flex items-center justify-center w-5 h-5">
                         {isAdaptive ? (
                           <span
                             className={`text-[9px] font-bold tracking-tight ${
@@ -1582,7 +1574,7 @@ export default function SingleTaskPage() {
                         )}
                       </div>
                       <span
-                        className={`text-[10px] ${
+                        className={`text-[10px] leading-none ${
                           isSelected ? 'text-purple-400' : 'text-gray-400'
                         }`}
                       >
@@ -1597,7 +1589,7 @@ export default function SingleTaskPage() {
             {/* 时长 + 分辨率 并排 */}
             <div className="grid grid-cols-5 gap-3">
               <div className="col-span-3">
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center justify-between mb-1">
                   <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">
                     视频时长
                   </label>
@@ -1614,13 +1606,13 @@ export default function SingleTaskPage() {
                   onChange={(e) => setDuration(Number(e.target.value) as Duration)}
                   className="w-full h-1.5 accent-purple-500 bg-gray-700 rounded-lg appearance-none cursor-pointer"
                 />
-                <div className="flex justify-between text-[9px] text-gray-500 mt-0.5 px-0.5">
+                <div className="flex justify-between text-[9px] text-gray-500 mt-0 px-0.5 leading-none">
                   <span>4s</span>
                   <span>15s</span>
                 </div>
               </div>
               <div className="col-span-2">
-                <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
+                <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-1.5">
                   分辨率
                 </label>
                 <div className="grid grid-cols-2 gap-1.5">
@@ -1630,7 +1622,7 @@ export default function SingleTaskPage() {
                       <button
                         key={r}
                         onClick={() => setResolution(r)}
-                        className={`px-2 py-2 rounded-lg text-xs font-medium border transition-all ${
+                        className={`px-2 py-1 rounded-lg text-xs font-medium border transition-all ${
                           selected
                             ? 'border-purple-500 bg-purple-500/10 text-purple-400'
                             : 'border-gray-700 bg-[#161824] text-gray-400 hover:border-gray-600'
@@ -1645,7 +1637,7 @@ export default function SingleTaskPage() {
             </div>
 
             {/* 开关行：有声视频 · 固定镜头 · 水印 */}
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-3 gap-1.5">
               <ToggleChip
                 label="有声视频"
                 tooltip="是否生成带音轨的视频（generate_audio）"
@@ -1668,13 +1660,13 @@ export default function SingleTaskPage() {
 
             {/* 种子（可选：空=随机） */}
             <div>
-              <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center justify-between mb-1">
                 <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">
                   种子 (Seed)
                 </label>
                 <span className="text-[10px] text-gray-500">空=随机，固定值可复现</span>
               </div>
-              <div className="flex gap-2">
+              <div className="flex gap-1.5">
                 <input
                   type="text"
                   inputMode="numeric"
@@ -1684,12 +1676,12 @@ export default function SingleTaskPage() {
                     setSeedInput(v);
                   }}
                   placeholder="留空随机"
-                  className="flex-1 px-3 py-1.5 bg-[#161824] border border-gray-700 rounded-lg text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-purple-500 tabular-nums"
+                  className="flex-1 px-2.5 py-1 bg-[#161824] border border-gray-700 rounded-lg text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-purple-500 tabular-nums"
                 />
                 <button
                   type="button"
                   onClick={() => setSeedInput(String(Math.floor(Math.random() * 2147483647)))}
-                  className="px-3 py-1.5 bg-[#161824] border border-gray-700 rounded-lg text-xs text-gray-300 hover:border-purple-500/60 hover:text-purple-300 transition-all"
+                  className="px-2.5 py-1 bg-[#161824] border border-gray-700 rounded-lg text-xs text-gray-300 hover:border-purple-500/60 hover:text-purple-300 transition-all"
                   title="生成一个随机种子"
                 >
                   随机
@@ -1698,7 +1690,7 @@ export default function SingleTaskPage() {
                   <button
                     type="button"
                     onClick={() => setSeedInput('')}
-                    className="px-3 py-1.5 bg-[#161824] border border-gray-700 rounded-lg text-xs text-gray-500 hover:text-gray-300 transition-all"
+                    className="px-2.5 py-1 bg-[#161824] border border-gray-700 rounded-lg text-xs text-gray-500 hover:text-gray-300 transition-all"
                     title="清空（=随机）"
                   >
                     清空
@@ -1707,22 +1699,22 @@ export default function SingleTaskPage() {
               </div>
             </div>
           </div>
+          </div>
+          {/* 右列：视频预览 + 生成/重置 — 视频区拉长填满剩余空间，lg 下吸附在视口内 */}
+          <div className="flex flex-col gap-4 min-w-0 pb-6 md:pb-0 lg:sticky lg:top-4 lg:self-start lg:h-[calc(100vh-6rem)] lg:min-h-[520px]">
+            <div className="flex-1 min-h-[260px] flex flex-col">
+              <ResultPreview
+                videoUrl={videoUrl}
+                isGenerating={isGenerating}
+                hasError={generation.status === 'error'}
+                error={generation.status === 'error' ? generation.error : undefined}
+                progress={generation.progress}
+                onOpen={() => setPlayerOpen(true)}
+              />
+            </div>
 
-          {/* Generate Section */}
-          <div className="pb-6 md:pb-4">
-            {/* Progress */}
-            {isGenerating && (
-              <div className="mb-4">
-                <div className="flex justify-between text-xs text-gray-400 mb-1">
-                  <span>{generation.progress || '处理中...'}</span>
-                </div>
-                <div className="w-full h-2 bg-gray-800 rounded-full overflow-hidden">
-                  <div className="h-full bg-gradient-to-r from-purple-600 to-indigo-600 rounded-full animate-progress" />
-                </div>
-              </div>
-            )}
-
-            <div className="flex gap-3">
+            {/* 生成 / 重置 按钮 */}
+            <div className="flex gap-3 flex-shrink-0">
               <button
                 onClick={handleGenerate}
                 disabled={!canGenerate}
@@ -1748,7 +1740,6 @@ export default function SingleTaskPage() {
                 重置
               </button>
             </div>
-          </div>
           </div>
         </div>
         </div>
