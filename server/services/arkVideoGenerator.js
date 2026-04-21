@@ -239,6 +239,9 @@ export async function createArkTask({
   audioUrls = [],
   ratio = '16:9',
   duration = 5,
+  resolution,
+  seed,
+  cameraFixed,
   generateAudio = true,
   watermark = false,
   onRetry,
@@ -253,6 +256,9 @@ export async function createArkTask({
     generate_audio: Boolean(generateAudio),
     watermark: Boolean(watermark),
   };
+  if (resolution) payload.resolution = String(resolution);
+  if (typeof seed === 'number' && Number.isFinite(seed)) payload.seed = Math.trunc(seed);
+  if (typeof cameraFixed === 'boolean') payload.camera_fixed = cameraFixed;
 
   // 日志: 截断 data URI / 长 URL, 避免刷屏
   const safeContent = payload.content.map((c) => {
@@ -326,6 +332,9 @@ export async function generateArkVideo(opts) {
     audioUrls = [],
     ratio = '16:9',
     duration = 5,
+    resolution,
+    seed,
+    cameraFixed,
     generateAudio = true,
     watermark = false,
     pollIntervalMs = 15000,
@@ -353,6 +362,9 @@ export async function generateArkVideo(opts) {
     audioUrls,
     ratio,
     duration,
+    resolution,
+    seed,
+    cameraFixed,
     generateAudio,
     watermark,
     onRetry: handleRetry,

@@ -49,6 +49,16 @@ export interface ConfigSnapshot {
   model: string;
   ratio: string;
   duration: number;
+  /** 分辨率：'480p' | '720p'（Seedance 2.0 系列支持）；旧快照可能无此字段 */
+  resolution?: string;
+  /** 种子整数；未设置或 null 表示随机 */
+  seed?: number | null;
+  /** 是否固定摄像头 */
+  cameraFixed?: boolean;
+  /** 是否包含水印 */
+  watermark?: boolean;
+  /** 是否生成音频（有声视频） */
+  generateAudio?: boolean;
   images: AssetSnapshot[];
   videos: AssetSnapshot[];
   audios: AssetSnapshot[];

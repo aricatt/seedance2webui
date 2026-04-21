@@ -1,9 +1,20 @@
 /**
  * 原有类型定义（从 types.ts 迁移过来）
  */
-export type AspectRatio = '21:9' | '16:9' | '4:3' | '1:1' | '3:4' | '9:16';
+export type AspectRatio =
+  | '21:9'
+  | '16:9'
+  | '4:3'
+  | '1:1'
+  | '3:4'
+  | '9:16'
+  /** 自适应：由模型根据素材自动决定输出比例（2.0 系列支持） */
+  | 'adaptive';
 
 export type Duration = 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15;
+
+/** 输出分辨率，Seedance 2.0 / 2.0 Fast 仅支持 480p 和 720p（见官方《Seedance 2.0 系列教程》） */
+export type Resolution = '480p' | '720p';
 
 /**
  * 方舟官方视频生成模型 ID
@@ -82,6 +93,16 @@ export interface GenerateVideoRequest {
   model: ModelId;
   ratio: AspectRatio;
   duration: Duration;
+  /** 分辨率：480p / 720p；默认 720p */
+  resolution?: Resolution;
+  /** 种子值（整数）；留空由模型随机 */
+  seed?: number;
+  /** 是否固定镜头（不运镜）；默认 false */
+  cameraFixed?: boolean;
+  /** 是否添加水印；默认 false */
+  watermark?: boolean;
+  /** 是否生成有声视频（仅在无参考音频时生效）；默认 true */
+  generateAudio?: boolean;
   /** 参考图片, 官方允许 1~9 张 */
   files: File[];
   /** 参考视频, 官方允许 0~3 段, 总时长 <= 15s */
@@ -121,9 +142,14 @@ export const RATIO_OPTIONS: RatioOption[] = [
   { value: '1:1', label: '1:1', widthRatio: 1, heightRatio: 1 },
   { value: '3:4', label: '3:4', widthRatio: 3, heightRatio: 4 },
   { value: '9:16', label: '9:16', widthRatio: 9, heightRatio: 16 },
+  /** adaptive 没有固定宽高比；UI 以 "自动" 图标呈现 */
+  { value: 'adaptive', label: '自适应', widthRatio: 0, heightRatio: 0 },
 ];
 
 export const DURATION_OPTIONS: Duration[] = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+/** Seedance 2.0 / 2.0 Fast 支持的分辨率选项 */
+export const RESOLUTION_OPTIONS: Resolution[] = ['480p', '720p'];
 
 
 

@@ -311,7 +311,32 @@ app.post(
   let dbTaskId = null;
 
   try {
-    const { prompt, ratio, duration, model } = req.body;
+    const {
+      prompt,
+      ratio,
+      duration,
+      model,
+      resolution,
+      seed,
+      camera_fixed: cameraFixedRaw,
+      watermark: watermarkRaw,
+      generate_audio: generateAudioRaw,
+    } = req.body;
+    const parseBool = (v, fallback) => {
+      if (v === undefined || v === null || v === '') return fallback;
+      if (typeof v === 'boolean') return v;
+      const s = String(v).toLowerCase();
+      return s === '1' || s === 'true' || s === 'yes' || s === 'on';
+    };
+    const cameraFixed = parseBool(cameraFixedRaw, false);
+    const watermark = parseBool(watermarkRaw, false);
+    const generateAudio = parseBool(generateAudioRaw, true);
+    const seedNum =
+      seed === undefined || seed === null || seed === ''
+        ? undefined
+        : Number.isFinite(Number(seed))
+          ? Math.trunc(Number(seed))
+          : undefined;
     const fileMap = req.files || {};
     const imageFiles = Array.isArray(fileMap.files) ? fileMap.files : [];
     const videoFiles = Array.isArray(fileMap.video) ? fileMap.video : [];
@@ -355,7 +380,8 @@ app.post(
 
     console.log(`\n========== [${taskId}] 收到视频生成请求 ==========`);
     console.log(`  prompt: ${(prompt || '').substring(0, 80)}${(prompt || '').length > 80 ? '...' : ''}`);
-    console.log(`  model: ${model || 'doubao-seedance-2-0-260128'}, ratio: ${ratio || '16:9'}, duration: ${duration || 5}秒`);
+    console.log(`  model: ${model || 'doubao-seedance-2-0-260128'}, ratio: ${ratio || '16:9'}, duration: ${duration || 5}秒, resolution: ${resolution || '(默认)'}`);
+    console.log(`  seed=${seedNum ?? '(random)'} camera_fixed=${cameraFixed} watermark=${watermark} generate_audio=${generateAudio}`);
     console.log(`  images=${imageFiles.length} video=${videoFiles.length} audio=${audioFiles.length}`);
 
     res.json({ taskId, dbTaskId });
@@ -433,8 +459,11 @@ app.post(
       audioUrls: audioUrls,
       ratio: ratio || '16:9',
       duration: parseInt(duration) || 5,
-      generateAudio: true,
-      watermark: false,
+      resolution: resolution || undefined,
+      seed: seedNum,
+      cameraFixed,
+      generateAudio,
+      watermark,
       onProgress: async (progress) => {
         task.progress = progress;
         console.log(`[${taskId}] [ark] ${progress}`);

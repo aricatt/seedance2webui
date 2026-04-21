@@ -4,10 +4,11 @@ import type {
   AspectRatio,
   Duration,
   ModelId,
+  Resolution,
   UploadedImage,
   GenerationState,
 } from '../types/index';
-import { RATIO_OPTIONS, DURATION_OPTIONS, MODEL_OPTIONS } from '../types/index';
+import { RATIO_OPTIONS, DURATION_OPTIONS, MODEL_OPTIONS, RESOLUTION_OPTIONS } from '../types/index';
 import { generateVideo } from '../services/videoService';
 import { archiveTask } from '../services/archiveService';
 import VideoPlayer from '../components/VideoPlayer';
@@ -62,6 +63,48 @@ interface AudioItem {
   id: string;
   file: File;
   duration: number;
+}
+
+/**
+ * 紧凑型 Toggle 芯片：整块按钮可点击切换，带视觉状态。
+ * 适用于"有声视频 / 固定镜头 / 水印"这类布尔开关，节省纵向空间。
+ */
+function ToggleChip({
+  label,
+  tooltip,
+  checked,
+  onChange,
+}: {
+  label: string;
+  tooltip?: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      title={tooltip}
+      className={`flex items-center justify-between gap-2 px-3 py-2 rounded-lg border text-xs transition-all ${
+        checked
+          ? 'border-purple-500 bg-purple-500/10 text-purple-300'
+          : 'border-gray-700 bg-[#161824] text-gray-400 hover:border-gray-600'
+      }`}
+    >
+      <span className="truncate">{label}</span>
+      <span
+        className={`relative inline-flex h-4 w-7 flex-shrink-0 rounded-full transition-colors ${
+          checked ? 'bg-purple-500' : 'bg-gray-700'
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-transform ${
+            checked ? 'translate-x-3.5' : 'translate-x-0.5'
+          }`}
+        />
+      </span>
+    </button>
+  );
 }
 
 /**
@@ -123,6 +166,15 @@ export default function SingleTaskPage() {
   const [model, setModel] = useState<ModelId>(MODEL_OPTIONS[0].value);
   const [ratio, setRatio] = useState<AspectRatio>('9:16');
   const [duration, setDuration] = useState<Duration>(5);
+  // 新暴露的 Seedance 2.0 原生参数
+  const [resolution, setResolution] = useState<Resolution>('720p');
+  /** 种子值；'' 表示随机（模型自动） */
+  const [seedInput, setSeedInput] = useState<string>('');
+  const [cameraFixed, setCameraFixed] = useState<boolean>(false);
+  const [watermark, setWatermark] = useState<boolean>(false);
+  const [generateAudio, setGenerateAudio] = useState<boolean>(true);
+  /** 右侧 VideoPlayer 是否折叠（默认展开；点击切换） */
+  const [resultCollapsed, setResultCollapsed] = useState<boolean>(false);
   const [generation, setGeneration] = useState<GenerationState>({
     status: 'idle',
   });
@@ -238,16 +290,35 @@ export default function SingleTaskPage() {
         }),
       ),
     );
+    const seedNum = seedInput.trim() === '' ? null : Number(seedInput);
     return {
       prompt,
       model,
       ratio,
       duration,
+      resolution,
+      seed: Number.isFinite(seedNum as number) ? (seedNum as number) : null,
+      cameraFixed,
+      watermark,
+      generateAudio,
       images: imageSnaps,
       videos: videoSnaps,
       audios: audioSnaps,
     };
-  }, [prompt, model, ratio, duration, images, videoItems, audioItems]);
+  }, [
+    prompt,
+    model,
+    ratio,
+    duration,
+    resolution,
+    seedInput,
+    cameraFixed,
+    watermark,
+    generateAudio,
+    images,
+    videoItems,
+    audioItems,
+  ]);
 
   // ==========================================================
   // 加载一个快照回填到 UI：清空现有素材 + 恢复参数 + 从 Blob 仓库重建文件
@@ -269,6 +340,17 @@ export default function SingleTaskPage() {
       if (snap.model) setModel(snap.model as ModelId);
       if (snap.ratio) setRatio(snap.ratio as AspectRatio);
       if (typeof snap.duration === 'number') setDuration(snap.duration as Duration);
+      if (snap.resolution === '480p' || snap.resolution === '720p') {
+        setResolution(snap.resolution);
+      }
+      if (typeof snap.seed === 'number' && Number.isFinite(snap.seed)) {
+        setSeedInput(String(snap.seed));
+      } else {
+        setSeedInput('');
+      }
+      if (typeof snap.cameraFixed === 'boolean') setCameraFixed(snap.cameraFixed);
+      if (typeof snap.watermark === 'boolean') setWatermark(snap.watermark);
+      if (typeof snap.generateAudio === 'boolean') setGenerateAudio(snap.generateAudio);
 
       // 并发尝试重建每个素材
       const imageResults = await Promise.all(
@@ -665,12 +747,18 @@ export default function SingleTaskPage() {
     }));
 
     try {
+      const seedNum = seedInput.trim() === '' ? undefined : Number(seedInput);
       const result = await generateVideo(
         {
           prompt,
           model,
           ratio,
           duration,
+          resolution,
+          seed: Number.isFinite(seedNum as number) ? (seedNum as number) : undefined,
+          cameraFixed,
+          watermark,
+          generateAudio,
           files: images.map((img) => img.file),
           videoFiles: videoItems.map((v) => v.file),
           audioFiles: audioItems.map((a) => a.file),
@@ -724,7 +812,22 @@ export default function SingleTaskPage() {
         error: error instanceof Error ? error.message : '未知错误',
       });
     }
-  }, [prompt, images, videoItems, audioItems, model, ratio, duration, generation.status, buildCurrentSnapshot]);
+  }, [
+    prompt,
+    images,
+    videoItems,
+    audioItems,
+    model,
+    ratio,
+    duration,
+    resolution,
+    seedInput,
+    cameraFixed,
+    watermark,
+    generateAudio,
+    generation.status,
+    buildCurrentSnapshot,
+  ]);
 
   const handleReset = () => {
     setPrompt('');
@@ -734,12 +837,21 @@ export default function SingleTaskPage() {
     setUploadWarning('');
     setGeneration({ status: 'idle' });
     setPending(null);
+    // 仅重置核心输入；不强制复位模型/比例/分辨率/时长/开关（用户预期保留偏好）
+    setSeedInput('');
   };
 
   const videoUrl =
     generation.status === 'success' && generation.result?.data?.[0]?.url
       ? generation.result.data[0].url
       : null;
+
+  // 生成完成或出错时，自动展开右侧预览面板，确保用户能看到结果
+  useEffect(() => {
+    if (generation.status === 'success' || generation.status === 'error') {
+      setResultCollapsed(false);
+    }
+  }, [generation.status]);
 
   const revisedPrompt =
     generation.status === 'success'
@@ -767,8 +879,14 @@ export default function SingleTaskPage() {
         </button>
       </div>
 
-      {/* Left Panel — Configuration */}
-      <div className="flex-1 md:w-[520px] md:flex-none md:border-r border-gray-800 overflow-y-auto custom-scrollbar p-4 md:p-6 bg-[#0f111a]">
+      {/* Left Panel — Configuration（右侧折叠时占满整屏） */}
+      <div
+        className={`flex-1 md:flex-none md:border-r border-gray-800 overflow-y-auto custom-scrollbar p-4 md:p-6 bg-[#0f111a] ${
+          resultCollapsed ? 'md:flex-1 md:w-auto' : 'md:w-[520px]'
+        }`}
+      >
+        {/* 折叠时的内部最大宽度约束，避免内容过宽 */}
+        <div className={resultCollapsed ? 'md:max-w-3xl md:mx-auto' : ''}>
         {/* Desktop Header */}
         <div className="hidden md:flex items-center justify-between mb-6">
           <h2 className="text-xl font-bold">{MODEL_OPTIONS.find(m => m.value === model)?.label || 'Seedance 2.0'} 视频配置</h2>
@@ -1216,73 +1334,93 @@ export default function SingleTaskPage() {
           </div>
 
           {/* Settings */}
-          <div className="bg-[#1c1f2e] rounded-2xl p-4 border border-gray-800 space-y-5">
-            {/* Model Selection */}
+          <div className="bg-[#1c1f2e] rounded-2xl p-4 border border-gray-800 space-y-4">
+            {/* 模型（紧凑：两个选项水平并列） */}
             <div>
-              <label className="text-xs font-bold text-gray-400 uppercase tracking-wider block mb-3">
+              <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
                 选择模型
               </label>
-              <div className="flex flex-col gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 {MODEL_OPTIONS.map((opt) => (
                   <button
                     key={opt.value}
                     onClick={() => setModel(opt.value)}
-                    className={`w-full text-left px-4 py-3 rounded-lg border transition-all ${
+                    title={opt.description}
+                    className={`text-left px-3 py-2 rounded-lg border transition-all ${
                       model === opt.value
                         ? 'border-purple-500 bg-purple-500/10'
                         : 'border-gray-700 bg-[#161824] hover:border-gray-600'
                     }`}
                   >
-                    <div className={`text-sm font-medium ${
-                      model === opt.value ? 'text-purple-400' : 'text-gray-300'
-                    }`}>
+                    <div
+                      className={`text-xs font-medium truncate ${
+                        model === opt.value ? 'text-purple-400' : 'text-gray-300'
+                      }`}
+                    >
                       {opt.label}
                     </div>
-                    <div className="text-xs text-gray-500 mt-0.5">{opt.description}</div>
+                    <div className="text-[10px] text-gray-500 mt-0.5 line-clamp-1">
+                      {opt.value === 'doubao-seedance-2-0-260128'
+                        ? '画质更好'
+                        : '更快，适合批量出稿'}
+                    </div>
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Aspect Ratio */}
+            {/* 画面比例（7 个按钮，一行 flex-wrap） */}
             <div>
-              <label className="text-xs font-bold text-gray-400 uppercase tracking-wider block mb-3">
+              <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
                 画面比例
               </label>
-              <div className="grid grid-cols-6 gap-2">
+              <div className="grid grid-cols-7 gap-1.5">
                 {RATIO_OPTIONS.map((opt) => {
                   const isSelected = opt.value === ratio;
-                  const maxDim = 24;
-                  const scale =
-                    maxDim / Math.max(opt.widthRatio, opt.heightRatio);
-                  const w = Math.round(opt.widthRatio * scale);
-                  const h = Math.round(opt.heightRatio * scale);
+                  const isAdaptive = opt.value === 'adaptive';
+                  const maxDim = 22;
+                  let w = 0,
+                    h = 0;
+                  if (!isAdaptive) {
+                    const scale = maxDim / Math.max(opt.widthRatio, opt.heightRatio);
+                    w = Math.round(opt.widthRatio * scale);
+                    h = Math.round(opt.heightRatio * scale);
+                  }
                   return (
                     <button
                       key={opt.value}
                       onClick={() => setRatio(opt.value)}
-                      className={`flex flex-col items-center gap-1.5 py-2 rounded-lg border transition-all ${
+                      title={isAdaptive ? '自适应：由模型根据素材自动决定比例' : opt.label}
+                      className={`flex flex-col items-center gap-1 py-1.5 rounded-lg border transition-all ${
                         isSelected
                           ? 'border-purple-500 bg-purple-500/10'
                           : 'border-gray-700 bg-[#161824] hover:border-gray-600'
                       }`}
                     >
-                      <div className="flex items-center justify-center w-8 h-8">
-                        <div
-                          className={`rounded-sm border ${
-                            isSelected
-                              ? 'border-purple-400'
-                              : 'border-gray-500'
-                          }`}
-                          style={{ width: `${w}px`, height: `${h}px` }}
-                        />
+                      <div className="flex items-center justify-center w-6 h-6">
+                        {isAdaptive ? (
+                          <span
+                            className={`text-[9px] font-bold tracking-tight ${
+                              isSelected ? 'text-purple-400' : 'text-gray-400'
+                            }`}
+                          >
+                            AUTO
+                          </span>
+                        ) : (
+                          <div
+                            className={`rounded-sm border ${
+                              isSelected ? 'border-purple-400' : 'border-gray-500'
+                            }`}
+                            style={{ width: `${w}px`, height: `${h}px` }}
+                          />
+                        )}
                       </div>
                       <span
-                        className={`text-[11px] ${
+                        className={`text-[10px] ${
                           isSelected ? 'text-purple-400' : 'text-gray-400'
                         }`}
                       >
-                        {opt.label}
+                        {isAdaptive ? '自适应' : opt.label}
                       </span>
                     </button>
                   );
@@ -1290,25 +1428,116 @@ export default function SingleTaskPage() {
               </div>
             </div>
 
-            {/* Duration */}
+            {/* 时长 + 分辨率 并排 */}
+            <div className="grid grid-cols-5 gap-3">
+              <div className="col-span-3">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">
+                    视频时长
+                  </label>
+                  <span className="text-[11px] text-purple-400 font-semibold tabular-nums">
+                    {duration}s
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={DURATION_OPTIONS[0]}
+                  max={DURATION_OPTIONS[DURATION_OPTIONS.length - 1]}
+                  step={1}
+                  value={duration}
+                  onChange={(e) => setDuration(Number(e.target.value) as Duration)}
+                  className="w-full h-1.5 accent-purple-500 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                />
+                <div className="flex justify-between text-[9px] text-gray-500 mt-0.5 px-0.5">
+                  <span>4s</span>
+                  <span>15s</span>
+                </div>
+              </div>
+              <div className="col-span-2">
+                <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
+                  分辨率
+                </label>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {RESOLUTION_OPTIONS.map((r) => {
+                    const selected = resolution === r;
+                    return (
+                      <button
+                        key={r}
+                        onClick={() => setResolution(r)}
+                        className={`px-2 py-2 rounded-lg text-xs font-medium border transition-all ${
+                          selected
+                            ? 'border-purple-500 bg-purple-500/10 text-purple-400'
+                            : 'border-gray-700 bg-[#161824] text-gray-400 hover:border-gray-600'
+                        }`}
+                      >
+                        {r}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* 开关行：有声视频 · 固定镜头 · 水印 */}
+            <div className="grid grid-cols-3 gap-2">
+              <ToggleChip
+                label="有声视频"
+                tooltip="是否生成带音轨的视频（generate_audio）"
+                checked={generateAudio}
+                onChange={setGenerateAudio}
+              />
+              <ToggleChip
+                label="固定镜头"
+                tooltip="固定摄像头，不允许运镜（camera_fixed）"
+                checked={cameraFixed}
+                onChange={setCameraFixed}
+              />
+              <ToggleChip
+                label="添加水印"
+                tooltip="是否在输出视频上添加平台水印（watermark）"
+                checked={watermark}
+                onChange={setWatermark}
+              />
+            </div>
+
+            {/* 种子（可选：空=随机） */}
             <div>
-              <label className="text-xs font-bold text-gray-400 uppercase tracking-wider block mb-3">
-                视频时长
-              </label>
-              <div className="flex flex-wrap gap-2">
-                {DURATION_OPTIONS.map((d) => (
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">
+                  种子 (Seed)
+                </label>
+                <span className="text-[10px] text-gray-500">空=随机，固定值可复现</span>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={seedInput}
+                  onChange={(e) => {
+                    const v = e.target.value.replace(/[^\d-]/g, '');
+                    setSeedInput(v);
+                  }}
+                  placeholder="留空随机"
+                  className="flex-1 px-3 py-1.5 bg-[#161824] border border-gray-700 rounded-lg text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-purple-500 tabular-nums"
+                />
+                <button
+                  type="button"
+                  onClick={() => setSeedInput(String(Math.floor(Math.random() * 2147483647)))}
+                  className="px-3 py-1.5 bg-[#161824] border border-gray-700 rounded-lg text-xs text-gray-300 hover:border-purple-500/60 hover:text-purple-300 transition-all"
+                  title="生成一个随机种子"
+                >
+                  随机
+                </button>
+                {seedInput && (
                   <button
-                    key={d}
-                    onClick={() => setDuration(d)}
-                    className={`px-3 py-2 rounded-lg text-sm font-medium border transition-all ${
-                      duration === d
-                        ? 'border-purple-500 bg-purple-500/10 text-purple-400'
-                        : 'border-gray-700 bg-[#161824] text-gray-400 hover:border-gray-600'
-                    }`}
+                    type="button"
+                    onClick={() => setSeedInput('')}
+                    className="px-3 py-1.5 bg-[#161824] border border-gray-700 rounded-lg text-xs text-gray-500 hover:text-gray-300 transition-all"
+                    title="清空（=随机）"
                   >
-                    {d}秒
+                    清空
                   </button>
-                ))}
+                )}
               </div>
             </div>
           </div>
@@ -1355,18 +1584,63 @@ export default function SingleTaskPage() {
             </div>
           </div>
         </div>
+        </div>
       </div>
 
-      {/* Right Panel — Result */}
-      <div className="flex-1 bg-[#090a0f] overflow-y-auto flex flex-col">
-        <VideoPlayer
-          videoUrl={videoUrl}
-          revisedPrompt={revisedPrompt}
-          isLoading={isGenerating}
-          error={generation.status === 'error' ? generation.error : undefined}
-          progress={generation.progress}
-        />
-      </div>
+      {/* Right Panel — Result（可折叠） */}
+      {resultCollapsed ? (
+        // 折叠态：仅保留一条竖向侧栏，显示状态 + 展开按钮
+        <div className="hidden md:flex w-12 flex-none bg-[#0b0c12] border-l border-gray-800 flex-col items-center py-4 gap-4">
+          <button
+            onClick={() => setResultCollapsed(false)}
+            title="展开视频预览面板"
+            className="w-9 h-9 flex items-center justify-center rounded-lg bg-[#1c1f2e] border border-gray-700 hover:border-purple-500/60 hover:text-purple-300 text-gray-400 transition-all"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+          </button>
+          {/* 竖向状态 */}
+          <div
+            className="flex-1 flex items-center justify-center text-[10px] text-gray-500 tracking-widest"
+            style={{ writingMode: 'vertical-rl' }}
+          >
+            {isGenerating
+              ? '生成中…'
+              : videoUrl
+                ? '已生成 ✓'
+                : generation.status === 'error'
+                  ? '生成失败'
+                  : '视频预览'}
+          </div>
+          {videoUrl && !isGenerating && (
+            <span
+              className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.7)]"
+              title="有可用的视频结果"
+            />
+          )}
+        </div>
+      ) : (
+        <div className="flex-1 bg-[#090a0f] overflow-y-auto flex flex-col relative">
+          {/* 折叠按钮，悬浮在右上 */}
+          <button
+            onClick={() => setResultCollapsed(true)}
+            title="折叠视频预览面板，腾出更多空间给设置"
+            className="hidden md:flex absolute top-3 right-3 z-10 w-9 h-9 items-center justify-center rounded-lg bg-[#1c1f2e]/90 backdrop-blur border border-gray-700 hover:border-purple-500/60 text-gray-400 hover:text-purple-300 transition-all"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
+          <VideoPlayer
+            videoUrl={videoUrl}
+            revisedPrompt={revisedPrompt}
+            isLoading={isGenerating}
+            error={generation.status === 'error' ? generation.error : undefined}
+            progress={generation.progress}
+          />
+        </div>
+      )}
 
       {/* 提示词编辑弹窗 — 左右双栏对比 */}
       {showPromptModal && (

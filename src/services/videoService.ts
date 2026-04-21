@@ -12,6 +12,19 @@ export async function generateVideo(
   formData.append('model', request.model);
   formData.append('ratio', request.ratio);
   formData.append('duration', String(request.duration));
+  if (request.resolution) formData.append('resolution', request.resolution);
+  if (typeof request.seed === 'number' && Number.isFinite(request.seed)) {
+    formData.append('seed', String(request.seed));
+  }
+  if (typeof request.cameraFixed === 'boolean') {
+    formData.append('camera_fixed', String(request.cameraFixed));
+  }
+  if (typeof request.watermark === 'boolean') {
+    formData.append('watermark', String(request.watermark));
+  }
+  if (typeof request.generateAudio === 'boolean') {
+    formData.append('generate_audio', String(request.generateAudio));
+  }
 
   for (const file of request.files) {
     formData.append('files', file);
