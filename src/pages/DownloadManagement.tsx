@@ -568,7 +568,7 @@ export default function DownloadManagementPage() {
                     {task.user_email || '-'}
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-300 max-w-xs truncate" title={task.prompt}>
-                    {task.prompt.substring(0, 30)}{task.prompt.length > 30 ? '...' : ''}
+                    {task.prompt.substring(0, 10)}{task.prompt.length > 10 ? '...' : ''}
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-300">
                     <span className={`px-2 py-0.5 rounded text-xs ${
