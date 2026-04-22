@@ -82,13 +82,14 @@ body {
   outline: none;
 }
 
+/**
+ * 段落无额外 margin：每个段落(含空段落)占一行，空段落由 min-height 自然撑开为空行。
+ * 这样 "一段落 = value 里的一个 \n" 视觉与序列化对称：
+ * 粘贴 A\n\nB → <p>A</p><p></p><p>B</p> → getText({blockSeparator:'\n'}) = A\n\nB。
+ */
 .prompt-editor-content p {
   margin: 0;
   min-height: 1.5em;
-}
-
-.prompt-editor-content p + p {
-  margin-top: 0.35em;
 }
 
 /* Placeholder (来自 @tiptap/extension-placeholder) */

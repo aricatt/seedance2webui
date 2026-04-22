@@ -3,6 +3,7 @@ import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
 import Mention from '@tiptap/extension-mention';
 import type { SuggestionProps, SuggestionKeyDownProps } from '@tiptap/suggestion';
+import { Fragment, Slice, type Node as PMNode } from '@tiptap/pm/model';
 import tippy, { type Instance as TippyInstance } from 'tippy.js';
 import { useEffect, useImperativeHandle, useRef, forwardRef, useCallback } from 'react';
 import { AssetMention } from './AssetMention';
@@ -224,6 +225,138 @@ const PromptEditor = forwardRef<PromptEditorHandle, PromptEditorProps>(function 
       attributes: {
         class:
           'prompt-editor-content w-full h-full whitespace-pre-wrap text-sm text-gray-200 leading-relaxed focus:outline-none',
+      },
+      /**
+       * 纯文本粘贴解析：每个 `\n` 都起一个新段落（空行 → 空段落）。
+       * 这样可以保持 "粘贴进来 → 序列化成 value → 再次粘出 / 重建" 三者的换行数量一致，
+       * 避免 ProseMirror 默认按 `\n{2,}` 分段导致空行被吞、叠加 CSS 段间距又看起来多一行的问题。
+       */
+      clipboardTextParser(text, _context, _plain, view) {
+        const schema = view.state.schema;
+        const paragraphType = schema.nodes.paragraph;
+        const paragraphs = text.split('\n').map((line) => {
+          const content = line.length > 0 ? [schema.text(line)] : [];
+          return paragraphType.create(null, content);
+        });
+        return new Slice(Fragment.fromArray(paragraphs), 1, 1);
+      },
+      /**
+       * HTML 粘贴归一化：来自网页 / Word / Google Docs / VS Code 等的 HTML 常是
+       *   `<p>A<br></p><p>B</p>` / `<p>A<br><br>B</p>` / `<p>A</p><p><br></p><p>B</p>` 等形态，
+       * 如果保留段落内的 hardBreak，渲染出来会比源文本多一行空白（段末 <br> + 段落本身 min-height）。
+       * 这里做两件事：
+       *   1) 段内 hardBreak 展开为独立段落，同时 **丢弃段首/段尾 hardBreak**（多为 ProseMirror 空段落的 trailing break 占位符）
+       *      —— 确保 "一段落 = value 里的一个 \n"，不会多一行也不会少一行。
+       *   2) 文本节点中的 `@图N / @视频N / @音频N` 如果能命中当前 assets，直接替换成 assetMention chip。
+       *      这样粘贴的文本和手打 + 触发 inputRule 得到的结果一致，不依赖 PasteRule 的时序/位置匹配。
+       */
+      transformPasted(slice, view) {
+        const schema = view.state.schema;
+        const paragraphType = schema.nodes.paragraph;
+        const assetMentionType = schema.nodes.assetMention;
+        if (!paragraphType) return slice;
+
+        const currentAssets = assetsRef.current;
+        const assetByLabel = new Map<string, AssetItem>();
+        for (const a of currentAssets) {
+          assetByLabel.set(`${a.kind}:${a.label}`, a);
+        }
+
+        /** 将一段字符串按 "@图N / @视频N / @音频N" 切成 [text, chip, text, ...] */
+        const expandText = (text: string): PMNode[] => {
+          if (!text) return [];
+          if (!assetMentionType || !text.includes('@')) return [schema.text(text)];
+          const regex = /@(图|视频|音频)(\d+)/g;
+          const out: PMNode[] = [];
+          let last = 0;
+          let m: RegExpExecArray | null;
+          while ((m = regex.exec(text)) !== null) {
+            const [full, cn, numStr] = m;
+            const kind = CN_TO_KIND[cn];
+            const label = `${cn}${numStr}`;
+            const asset = kind ? assetByLabel.get(`${kind}:${label}`) : undefined;
+            if (!asset) continue;
+            if (m.index > last) out.push(schema.text(text.slice(last, m.index)));
+            out.push(
+              assetMentionType.create({
+                kind: asset.kind,
+                assetId: asset.id,
+                label: asset.label,
+                thumb: asset.thumb ?? null,
+              }),
+            );
+            last = m.index + full.length;
+          }
+          if (out.length === 0) return [schema.text(text)];
+          if (last < text.length) out.push(schema.text(text.slice(last)));
+          return out;
+        };
+
+        /** 合并 Fragment 中相邻 text（忽略 marks，StarterKit 已禁用 inline marks），
+         *  并在合并后的整段字符串上做 mention 展开。 */
+        const normalizeInlineFragment = (frag: Fragment): PMNode[] => {
+          const merged: PMNode[] = [];
+          let buf = '';
+          const flush = () => {
+            if (buf.length > 0) {
+              merged.push(...expandText(buf));
+              buf = '';
+            }
+          };
+          frag.forEach((child) => {
+            if (child.type.name === 'text' && child.text) {
+              buf += child.text;
+            } else {
+              flush();
+              merged.push(child);
+            }
+          });
+          flush();
+          return merged;
+        };
+
+        /** 对段落 children 展开 mention，再按 hardBreak 切分成多个段落 */
+        const splitParagraph = (block: PMNode): PMNode[] => {
+          const flattened = normalizeInlineFragment(block.content);
+          // 去掉段首/段尾的 hardBreak（多为 ProseMirror 空段落的 trailing break 占位）
+          while (flattened.length && flattened[0].type.name === 'hardBreak') flattened.shift();
+          while (flattened.length && flattened[flattened.length - 1].type.name === 'hardBreak') flattened.pop();
+          // 按 hardBreak 切分成子段落（内部真正的换行）
+          const segments: PMNode[][] = [[]];
+          for (const child of flattened) {
+            if (child.type.name === 'hardBreak') {
+              segments.push([]);
+            } else {
+              segments[segments.length - 1].push(child);
+            }
+          }
+          return segments.map((seg) => paragraphType.create(block.attrs, Fragment.fromArray(seg)));
+        };
+
+        // slice.content 的两大形态：
+        //   A) block-only：[paragraph, paragraph, ...]
+        //   B) inline-only：[text, text, hardBreak, ...]
+        // 两条路径都先走 normalizeInlineFragment/splitParagraph，保证 mention 转换一致。
+        const firstChild = slice.content.firstChild;
+        const isInlineSlice = !!firstChild && firstChild.isInline;
+
+        if (isInlineSlice) {
+          const inline = normalizeInlineFragment(slice.content);
+          return new Slice(Fragment.fromArray(inline), slice.openStart, slice.openEnd);
+        }
+
+        const normalized: PMNode[] = [];
+        slice.content.forEach((block) => {
+          if (block.type === paragraphType) {
+            normalized.push(...splitParagraph(block));
+          } else if (block.isTextblock) {
+            normalized.push(...splitParagraph(paragraphType.create(null, block.content)));
+          } else {
+            normalized.push(block);
+          }
+        });
+
+        return new Slice(Fragment.fromArray(normalized), slice.openStart, slice.openEnd);
       },
       handleDrop(view, event, _slice, moved) {
         if (moved) return false;
