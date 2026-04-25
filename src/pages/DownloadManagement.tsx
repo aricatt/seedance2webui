@@ -4,7 +4,7 @@ import type { DownloadTask } from '../types/index';
 import { useToast } from '../components/Toast';
 import { useApp } from '../context/AppContext';
 import { getAuthHeaders } from '../services/authService';
-import { formatDbTime } from '../utils/datetime';
+import { formatDbTime, parseDbTimeMs } from '../utils/datetime';
 
 interface DownloadState {
   tasks: DownloadTask[];
@@ -75,12 +75,18 @@ export default function DownloadManagementPage() {
   }, [detail, preview]);
 
   const toGeneratingTasks = (items: Array<{ taskId: number; historyId: string; createdAt: string }> = []) =>
-    items.map((task) => ({
-      taskId: task.taskId,
-      historyId: task.historyId,
-      createdAt: task.createdAt,
-      elapsedSeconds: Math.floor((Date.now() - new Date(task.createdAt).getTime()) / 1000),
-    }));
+    items.map((task) => {
+      const createdMs = parseDbTimeMs(task.createdAt);
+      return {
+        taskId: task.taskId,
+        historyId: task.historyId,
+        createdAt: task.createdAt,
+        // SQLite 的 created_at 是 UTC 无时区字符串，必须按 UTC 解析，否则会偏 8 小时
+        elapsedSeconds: Number.isNaN(createdMs)
+          ? 0
+          : Math.max(0, Math.floor((Date.now() - createdMs) / 1000)),
+      };
+    });
 
   // 手动添加单个任务到轮询列表
   const handleWatchTask = (taskId: number, historyId: string, createdAt: string) => {
@@ -88,13 +94,16 @@ export default function DownloadManagementPage() {
       if (prev.some((t) => t.taskId === taskId)) {
         return prev;
       }
+      const createdMs = parseDbTimeMs(createdAt);
       return [
         ...prev,
         {
           taskId,
           historyId,
           createdAt,
-          elapsedSeconds: Math.floor((Date.now() - new Date(createdAt).getTime()) / 1000),
+          elapsedSeconds: Number.isNaN(createdMs)
+            ? 0
+            : Math.max(0, Math.floor((Date.now() - createdMs) / 1000)),
         },
       ];
     });

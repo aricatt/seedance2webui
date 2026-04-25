@@ -17,18 +17,26 @@
  *   - `2026-04-21T02:55:00Z` / 带 +HH:MM 时区（已带时区则原样解析）
  * 其它解析失败时，返回原字符串。
  */
-export function formatDbTime(utc?: string | null, locale = 'zh-CN'): string {
-  if (!utc) return '-';
+/**
+ * 将 DB 返回的 UTC 无时区时间字符串解析为毫秒时间戳。
+ * 解析失败返回 NaN。无时区标记的字符串一律当作 UTC，避免 `new Date()` 把
+ * `"YYYY-MM-DD HH:MM:SS"` 当作本地时间，导致北京时区下偏差 8 小时 / 480 分钟。
+ */
+export function parseDbTimeMs(utc?: string | null): number {
+  if (!utc) return Number.NaN;
   const trimmed = String(utc).trim();
-  // 已经带时区标记（Z 或 ±HH:MM）则直接解析
   const hasTz = /([Zz]|[+\-]\d{2}:?\d{2})$/.test(trimmed);
-  // 无 T 的用 T 替换空格，再补 Z
   const normalized = hasTz
     ? trimmed
     : (trimmed.includes('T') ? trimmed : trimmed.replace(' ', 'T')) + 'Z';
-  const d = new Date(normalized);
-  if (Number.isNaN(d.getTime())) return trimmed;
-  return d.toLocaleString(locale);
+  return new Date(normalized).getTime();
+}
+
+export function formatDbTime(utc?: string | null, locale = 'zh-CN'): string {
+  if (!utc) return '-';
+  const ms = parseDbTimeMs(utc);
+  if (Number.isNaN(ms)) return String(utc).trim();
+  return new Date(ms).toLocaleString(locale);
 }
 
 /**
@@ -36,12 +44,7 @@ export function formatDbTime(utc?: string | null, locale = 'zh-CN'): string {
  */
 export function formatDbDate(utc?: string | null, locale = 'zh-CN'): string {
   if (!utc) return '-';
-  const trimmed = String(utc).trim();
-  const hasTz = /([Zz]|[+\-]\d{2}:?\d{2})$/.test(trimmed);
-  const normalized = hasTz
-    ? trimmed
-    : (trimmed.includes('T') ? trimmed : trimmed.replace(' ', 'T')) + 'Z';
-  const d = new Date(normalized);
-  if (Number.isNaN(d.getTime())) return trimmed;
-  return d.toLocaleDateString(locale);
+  const ms = parseDbTimeMs(utc);
+  if (Number.isNaN(ms)) return String(utc).trim();
+  return new Date(ms).toLocaleDateString(locale);
 }
