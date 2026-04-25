@@ -179,7 +179,7 @@ async function estimateFps(video: HTMLVideoElement): Promise<number | null> {
   try {
     // 开始播放用于触发帧回调
     video.currentTime = 0;
-    await video.play().catch(() => {});
+    await video.play().catch(() => { });
     const sampleMs = 500;
     const start = performance.now();
     let frames = 0;
