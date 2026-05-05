@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import fs from 'fs';
 import express from 'express';
 import cors from 'cors';
@@ -22,6 +22,11 @@ import {
   isTosConfigured,
 } from './services/tosUploader.js';
 import { guessMimeType } from './services/arkFileUploader.js';
+import { writeIntegrationGenerateVideoArchive } from './services/taskArchiveServer.js';
+
+/** 无论从哪个工作目录启动 node server/index.js，都读取项目根目录 .env（避免读不到 STUDIO_INTEGRATION_*） */
+const __serverDir = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__serverDir, '..', '.env') });
 
 // 启动时验证 ARK_API_KEY 已配置, 缺失则 fail-fast
 assertArkApiKeyOrExit();
@@ -169,6 +174,51 @@ setInterval(cleanupExpiredDownloadTokens, DOWNLOAD_TOKEN_TTL_MS).unref();
 
 // 认证中间件
 const authenticate = async (req, res, next) => {
+  // Studio / 其它后端服务：Bearer 与 STUDIO_INTEGRATION_TOKEN 一致时，挂到固定集成用户（任务仍落库，便于排障）
+  const integrationToken = (process.env.STUDIO_INTEGRATION_TOKEN || '').trim();
+  const authz = (req.headers.authorization || '').trim();
+  const bearerMatch = /^Bearer\s+(\S+)/i.exec(authz);
+  const bearerToken = bearerMatch ? bearerMatch[1].trim() : '';
+  if (integrationToken && bearerToken === integrationToken) {
+    const email = (process.env.STUDIO_INTEGRATION_USER_EMAIL || '').trim();
+    if (!email) {
+      return res
+        .status(500)
+        .json({ error: '服务器未配置 STUDIO_INTEGRATION_USER_EMAIL，无法使用集成鉴权' });
+    }
+    try {
+      const db = getDatabase();
+      const user = db
+        .prepare('SELECT id, email, role, status, credits FROM users WHERE email = ?')
+        .get(email);
+      if (!user) {
+        return res.status(403).json({
+          error: `集成用户不存在，请在 ModelTooSD 先注册/创建账号: ${email}`,
+        });
+      }
+      if (user.status !== 'active') {
+        return res.status(403).json({ error: '集成用户未启用' });
+      }
+      req.user = user;
+      req.sessionId = 'integration';
+      const actor = String(req.headers['x-studio-actor'] || '').trim().slice(0, 200);
+      req.studioActorLabel = actor || null;
+      return next();
+    } catch (e) {
+      return res.status(500).json({ error: e.message || '集成鉴权失败' });
+    }
+  }
+
+  if (!integrationToken && bearerToken) {
+    console.warn(
+      '[auth] 收到 Bearer 但未加载 STUDIO_INTEGRATION_TOKEN（请确认项目根 .env 与启动顺序）；将按 Session 校验 → 易 401'
+    );
+  } else if (integrationToken && bearerToken && bearerToken !== integrationToken) {
+    console.warn(
+      `[auth] Bearer 与 STUDIO_INTEGRATION_TOKEN 不一致（长度 ${bearerToken.length} vs ${integrationToken.length}）`
+    );
+  }
+
   const sessionId = req.headers['x-session-id'];
 
   if (!sessionId) {
@@ -361,6 +411,10 @@ app.post(
 
     try {
       const defaultProject = ensureDefaultProjectForUser(req.user.id);
+      const accountInfo =
+        req.studioActorLabel != null && req.studioActorLabel !== ''
+          ? JSON.stringify({ creator_label: req.studioActorLabel, via: 'studio' })
+          : null;
       const createdTask = taskService.createTask({
         projectId: defaultProject.id,
         userId: req.user.id,
@@ -371,6 +425,7 @@ app.post(
         progress: '正在准备...',
         startedAt: new Date().toISOString(),
         duration: parseInt(duration) || 5,
+        accountInfo,
       });
       dbTaskId = createdTask.id;
       console.log(`[生成任务] 数据库记录已创建，db_task_id = ${dbTaskId}, project_id = ${defaultProject.id}`);
@@ -384,7 +439,38 @@ app.post(
     console.log(`  seed=${seedNum ?? '(random)'} camera_fixed=${cameraFixed} watermark=${watermark} generate_audio=${generateAudio}`);
     console.log(`  images=${imageFiles.length} video=${videoFiles.length} audio=${audioFiles.length}`);
 
-    res.json({ taskId, dbTaskId });
+    // 显式 Content-Length + Connection:close，避免 chunked 响应与后续同步重负载叠加时 httpx 侧 ReadError
+    const payload = JSON.stringify({ taskId, dbTaskId });
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Length', Buffer.byteLength(payload, 'utf8'));
+    res.setHeader('Connection', 'close');
+    res.end(payload);
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Studio 集成（小云雀代提交）无浏览器归档：服务端写入 HTML 归档，内容与前台「提交即归档」一致思路（缩略图 + 提示词 + 参数）
+    if (dbTaskId && req.sessionId === 'integration') {
+      try {
+        await writeIntegrationGenerateVideoArchive(dbTaskId, {
+          prompt: prompt || '',
+          model: model || 'doubao-seedance-2-0-260128',
+          ratio: ratio || '16:9',
+          duration: parseInt(duration) || 5,
+          resolution: resolution || '',
+          seed: seedNum,
+          cameraFixed,
+          watermark,
+          generateAudio,
+          creatorLabel: req.studioActorLabel || '',
+          imageFiles,
+          videoFiles,
+          audioFiles,
+        });
+      } catch (arcErr) {
+        console.warn(`[archive] 集成任务 ${dbTaskId} 服务端归档失败（不影响生成）:`, arcErr.message || arcErr);
+      }
+    }
 
     // 先把所有素材上传到方舟 (命中缓存则直接复用 file_id)
     const logProgress = (msg) => {
@@ -2408,6 +2494,15 @@ app.listen(PORT, () => {
   console.log(`\n🚀 服务器已启动: http://localhost:${PORT}`);
   console.log(`🔗 方舟官方 API : https://ark.cn-beijing.volces.com/api/v3`);
   console.log(`🔑 ARK_API_KEY : ${maskedKey}`);
+  const intTok = (process.env.STUDIO_INTEGRATION_TOKEN || '').trim();
+  const intMail = (process.env.STUDIO_INTEGRATION_USER_EMAIL || '').trim();
+  if (intTok) {
+    console.log(
+      `🔌 Studio 集成    : 已启用（${intMail ? 'STUDIO_INTEGRATION_USER_EMAIL 已配置' : '⚠️ 缺少 STUDIO_INTEGRATION_USER_EMAIL，Bearer 匹配后将 500'}）`
+    );
+  } else {
+    console.log('🔌 Studio 集成    : 未启用 — 未读到 STUDIO_INTEGRATION_TOKEN（小云雀代提交视频将 401）');
+  }
   console.log(`📁 运行模式    : ${process.env.NODE_ENV === 'production' ? '生产' : '开发'}\n`);
 
   // 启动后清理已过期的 TOS 文件缓存, 并异步恢复未完成的任务

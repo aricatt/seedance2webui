@@ -2,9 +2,11 @@
  * TOS (火山引擎对象存储) 上传服务
  *
  * 职责:
- *  1. 将视频 / 音频文件上传到 TOS 私有桶;
+ *  1. 将视频 / 音频文件上传到 TOS 私有「缓存桶」(TOS_CACHE_BUCKET, 可回退读取旧名 TOS_BUCKET);
  *  2. 生成带时效的预签名 URL, 供方舟 Content Generation API 下载素材;
  *  3. 按文件 SHA-256 去重, 命中缓存 (在有效期内) 则直接复用 URL;
+ *
+ * 持久化桶 TOS_PERSIST_BUCKET（如 yun-lib）与缓存池分离；持久上传逻辑可后续在此模块扩展。
  *
  * 为什么不用 Files API?
  *  Files API 是为 Responses API (多模态理解) 设计的,
@@ -21,21 +23,26 @@ import { getDatabase } from '../database/index.js';
 // 配置
 // ============================================================
 
-function getTosConfig() {
+function getTosCacheConfig() {
   return {
     accessKeyId: process.env.TOS_ACCESS_KEY_ID || '',
     secretAccessKey: process.env.TOS_SECRET_ACCESS_KEY || '',
     region: process.env.TOS_REGION || 'cn-guangzhou',
     endpoint: process.env.TOS_ENDPOINT || 'tos-cn-guangzhou.volces.com',
-    bucket: process.env.TOS_BUCKET || 'seedance-cache',
+    bucket: (process.env.TOS_CACHE_BUCKET || process.env.TOS_BUCKET || 'seedance-cache').trim(),
   };
+}
+
+/** 持久化桶名（与缓存桶不同；AK/SK/region/endpoint 与缓存共用） */
+export function getTosPersistBucket() {
+  return (process.env.TOS_PERSIST_BUCKET || '').trim();
 }
 
 let _tosClient = null;
 
 function getTosClient() {
   if (_tosClient) return _tosClient;
-  const cfg = getTosConfig();
+  const cfg = getTosCacheConfig();
   if (!cfg.accessKeyId || !cfg.secretAccessKey) {
     throw new Error('TOS 配置缺失: 请在 .env 中设置 TOS_ACCESS_KEY_ID 和 TOS_SECRET_ACCESS_KEY');
   }
@@ -152,7 +159,7 @@ function isCacheFresh(row) {
 async function checkTosObjectExists(tosKey) {
   try {
     const client = getTosClient();
-    const cfg = getTosConfig();
+    const cfg = getTosCacheConfig();
     await client.headObject({
       bucket: cfg.bucket,
       key: tosKey,
@@ -189,7 +196,7 @@ export function cleanupExpiredTosCache() {
  */
 async function uploadToTos(buffer, filename, mimeType) {
   const client = getTosClient();
-  const cfg = getTosConfig();
+  const cfg = getTosCacheConfig();
 
   const ext = path.extname(filename) || '';
   const ts = Date.now();
@@ -228,7 +235,7 @@ async function uploadToTos(buffer, filename, mimeType) {
  */
 async function getPresignedUrl(tosKey, expirySec = PRESIGN_EXPIRY_SEC) {
   const client = getTosClient();
-  const cfg = getTosConfig();
+  const cfg = getTosCacheConfig();
 
   const result = await client.getPreSignedUrl({
     bucket: cfg.bucket,
@@ -308,8 +315,13 @@ export async function getOrUploadToTosByPath(filePath, opts = {}) {
  * 检查 TOS 是否已配置
  */
 export function isTosConfigured() {
-  const cfg = getTosConfig();
+  const cfg = getTosCacheConfig();
   return !!(cfg.accessKeyId && cfg.secretAccessKey && cfg.bucket);
+}
+
+/** 持久桶已配置名且具备上传凭证（供后续持久化上传入口使用） */
+export function isTosPersistConfigured() {
+  return isTosConfigured() && !!getTosPersistBucket();
 }
 
 export default {
@@ -317,6 +329,8 @@ export default {
   getOrUploadToTosByPath,
   cleanupExpiredTosCache,
   isTosConfigured,
+  isTosPersistConfigured,
+  getTosPersistBucket,
   guessMimeType,
   sha256Hex,
 };

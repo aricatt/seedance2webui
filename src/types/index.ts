@@ -13,8 +13,8 @@ export type AspectRatio =
 
 export type Duration = 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15;
 
-/** 输出分辨率，Seedance 2.0 / 2.0 Fast 仅支持 480p 和 720p（见官方《Seedance 2.0 系列教程》） */
-export type Resolution = '480p' | '720p';
+/** 输出分辨率，Seedance 2.0 支持 480p、720p、1080p（2.0 Fast 仅支持 480p、720p） */
+export type Resolution = '480p' | '720p' | '1080p';
 
 /**
  * 方舟官方视频生成模型 ID
@@ -93,7 +93,7 @@ export interface GenerateVideoRequest {
   model: ModelId;
   ratio: AspectRatio;
   duration: Duration;
-  /** 分辨率：480p / 720p；默认 720p */
+  /** 分辨率：480p / 720p / 1080p；默认 720p */
   resolution?: Resolution;
   /** 种子值（整数）；留空由模型随机 */
   seed?: number;
@@ -148,8 +148,8 @@ export const RATIO_OPTIONS: RatioOption[] = [
 
 export const DURATION_OPTIONS: Duration[] = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
-/** Seedance 2.0 / 2.0 Fast 支持的分辨率选项 */
-export const RESOLUTION_OPTIONS: Resolution[] = ['480p', '720p'];
+/** Seedance 2.0 支持的分辨率选项（2.0 Fast 仅支持 480p、720p） */
+export const RESOLUTION_OPTIONS: Resolution[] = ['480p', '720p', '1080p'];
 
 
 
@@ -346,6 +346,7 @@ export interface Settings {
   model?: string;
   ratio?: string;
   duration?: string;
+  resolution?: string;
   download_path?: string;
   max_concurrent?: string;
   min_interval?: string;

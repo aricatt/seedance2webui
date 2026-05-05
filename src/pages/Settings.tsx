@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import * as settingsService from '../services/settingsService';
-import { RATIO_OPTIONS, DURATION_OPTIONS, MODEL_OPTIONS } from '../types/index';
+import { RATIO_OPTIONS, DURATION_OPTIONS, MODEL_OPTIONS, RESOLUTION_OPTIONS } from '../types/index';
 import { SparkleIcon, CheckIcon } from '../components/Icons';
 import { useToast } from '../components/Toast';
 
@@ -14,6 +14,7 @@ export default function SettingsPage() {
     model: settings.model || 'doubao-seedance-2-0-260128',
     ratio: settings.ratio || '16:9',
     duration: settings.duration || '5',
+    resolution: settings.resolution || '720p',
     download_path: settings.download_path || '',
     max_concurrent: settings.max_concurrent || '5',
     min_interval: settings.min_interval || '30000',
@@ -44,6 +45,7 @@ export default function SettingsPage() {
       localSettings.model !== settings.model ||
       localSettings.ratio !== settings.ratio ||
       localSettings.duration !== settings.duration ||
+      localSettings.resolution !== settings.resolution ||
       localSettings.download_path !== settings.download_path ||
       localSettings.max_concurrent !== settings.max_concurrent ||
       localSettings.min_interval !== settings.min_interval ||
@@ -194,6 +196,40 @@ export default function SettingsPage() {
                 ))}
               </div>
             </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">
+                输出分辨率
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {RESOLUTION_OPTIONS.map((r) => {
+                  const isFastModel = localSettings.model === 'doubao-seedance-2-0-fast-260128';
+                  const is1080pDisabled = isFastModel && r === '1080p';
+                  return (
+                    <button
+                      key={r}
+                      onClick={() => !is1080pDisabled && setLocalSettings((prev) => ({
+                        ...prev,
+                        resolution: r,
+                      }))}
+                      disabled={is1080pDisabled}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium border transition-all ${
+                        localSettings.resolution === r
+                          ? 'border-purple-500 bg-purple-500/10 text-purple-400'
+                          : is1080pDisabled
+                          ? 'border-gray-800 bg-gray-900 text-gray-600 cursor-not-allowed'
+                          : 'border-gray-700 bg-[#161824] text-gray-400 hover:border-gray-600'
+                      }`}
+                    >
+                      {r}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-gray-500 mt-2">
+                Seedance 2.0 支持 1080p，2.0 Fast 仅支持 480p/720p
+              </p>
+            </div>
           </div>
         </div>
 
@@ -297,6 +333,7 @@ export default function SettingsPage() {
                 model: settings.model || 'doubao-seedance-2-0-260128',
                 ratio: settings.ratio || '16:9',
                 duration: settings.duration || '5',
+                resolution: settings.resolution || '720p',
                 download_path: settings.download_path || '',
                 max_concurrent: settings.max_concurrent || '5',
                 min_interval: settings.min_interval || '30000',

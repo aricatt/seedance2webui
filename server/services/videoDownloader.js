@@ -352,7 +352,19 @@ export function getDownloadTasks(options = {}) {
       t.error_message,
       t.revised_prompt,
       p.name as project_name,
-      u.email as user_email,
+      COALESCE(
+        NULLIF(
+          TRIM(
+            CASE
+              WHEN json_valid(COALESCE(t.account_info, ''))
+              THEN json_extract(t.account_info, '$.creator_label')
+              ELSE NULL
+            END
+          ),
+          ''
+        ),
+        u.email
+      ) as user_email,
       CASE
         WHEN t.status = 'error' THEN 'failed'
         WHEN t.status = 'generating' OR (t.history_id IS NOT NULL AND t.video_url IS NULL AND t.status NOT IN ('cancelled', 'error')) THEN 'generating'

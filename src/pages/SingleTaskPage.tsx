@@ -468,7 +468,7 @@ export default function SingleTaskPage() {
       if (snap.model) setModel(snap.model as ModelId);
       if (snap.ratio) setRatio(snap.ratio as AspectRatio);
       if (typeof snap.duration === 'number') setDuration(snap.duration as Duration);
-      if (snap.resolution === '480p' || snap.resolution === '720p') {
+      if (snap.resolution === '480p' || snap.resolution === '720p' || snap.resolution === '1080p') {
         setResolution(snap.resolution);
       }
       if (typeof snap.seed === 'number' && Number.isFinite(snap.seed)) {
@@ -1618,13 +1618,18 @@ export default function SingleTaskPage() {
                 <div className="grid grid-cols-2 gap-1.5">
                   {RESOLUTION_OPTIONS.map((r) => {
                     const selected = resolution === r;
+                    const isFastModel = model === 'doubao-seedance-2-0-fast-260128';
+                    const is1080pDisabled = isFastModel && r === '1080p';
                     return (
                       <button
                         key={r}
-                        onClick={() => setResolution(r)}
+                        onClick={() => !is1080pDisabled && setResolution(r)}
+                        disabled={is1080pDisabled}
                         className={`px-2 py-1 rounded-lg text-xs font-medium border transition-all ${
                           selected
                             ? 'border-purple-500 bg-purple-500/10 text-purple-400'
+                            : is1080pDisabled
+                            ? 'border-gray-800 bg-gray-900 text-gray-600 cursor-not-allowed'
                             : 'border-gray-700 bg-[#161824] text-gray-400 hover:border-gray-600'
                         }`}
                       >
