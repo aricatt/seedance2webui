@@ -313,7 +313,7 @@ export async function getArkTask({ apiKey, baseUrl = ARK_API_BASE_URL, taskId, o
  * @param {boolean} [opts.generateAudio]  是否生成音频
  * @param {boolean} [opts.watermark]      是否水印
  * @param {number} [opts.pollIntervalMs]  轮询间隔, 默认 15s
- * @param {number} [opts.maxWaitMs]       最大等待, 默认 15 分钟
+ * @param {number} [opts.maxWaitMs]       最大等待, 默认 3600 秒 (1 小时)
  * @param {(progress:string)=>any} [opts.onProgress]
  * @param {(taskId:string)=>any}   [opts.onSubmitId]
  * @param {(taskId:string)=>any}   [opts.onHistoryId]
@@ -338,7 +338,7 @@ export async function generateArkVideo(opts) {
     generateAudio = true,
     watermark = false,
     pollIntervalMs = 15000,
-    maxWaitMs = 15 * 60 * 1000,
+    maxWaitMs = 3600 * 1000,
     onProgress = () => {},
     onSubmitId = () => {},
     onHistoryId = () => {},
@@ -399,7 +399,7 @@ export async function pollArkTaskUntilDone({
   baseUrl = ARK_API_BASE_URL,
   taskId,
   pollIntervalMs = 15000,
-  maxWaitMs = 15 * 60 * 1000,
+  maxWaitMs = 3600 * 1000,
   prompt = '',
   onProgress = () => {},
   onVideoReady = () => {},

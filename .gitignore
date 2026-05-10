@@ -3,3 +3,7 @@
 node_modules
 *.db
 data/assets/tasks/*
+
+# FFmpeg 容器挂载目录（产物不入库）
+temp_ffmpeg/*
+!temp_ffmpeg/.gitkeep

@@ -3,8 +3,9 @@
 # 开发：`dev.ps1` 会 `docker compose -f docker-compose.ffmpeg.yml up -d`
 # 停止：`docker compose -f docker-compose.ffmpeg.yml down`
 #
-# 示例（在项目根执行，/work 需与挂载路径一致）：
-#   docker exec modeltoosd-ffmpeg-tools ffmpeg -y -ss 0 -i "https://..." -vframes 1 -q:v 2 /work/poster.jpg
+# 默认挂载项目下 temp_ffmpeg -> 容器内 /temp（读写对齐宿主机，便于 docker exec 输出文件）
+# 示例：
+#   docker exec modeltoosd-ffmpeg-tools ffmpeg -y -ss 0 -i "https://..." -vframes 1 -q:v 2 /temp/poster.jpg
 
 services:
   ffmpeg-tools:
@@ -14,4 +15,6 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     # 勿用 sleep infinity：Alpine/BusyBox 常不支持；用循环 sleep 常驻
     command: ["while true; do sleep 3600; done"]
+    volumes:
+      - ./temp_ffmpeg:/temp
     restart: unless-stopped

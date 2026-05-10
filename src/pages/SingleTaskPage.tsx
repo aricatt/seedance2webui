@@ -895,21 +895,24 @@ export default function SingleTaskPage() {
           setGeneration((prev) => ({ ...prev, progress }));
         },
         // 任务提交成功后立即触发客户端归档（fire-and-forget，失败不影响主流程）
+        // 注意：服务端若创建 DB 任务失败，dbTaskId 可能为 null，但生成仍会进行；
+        // 「最近历史」仅依赖提交成功，必须与 dbTaskId / 归档解耦，否则会全队不写历史。
         ({ dbTaskId }) => {
-          if (!dbTaskId) return;
-          void archiveTask({
-            prompt,
-            images: archiveImages,
-            videos: archiveVideos,
-            audios: archiveAudios,
-            meta: {
-              taskId: dbTaskId,
-              submittedAt: new Date().toISOString(),
-              model,
-              ratio,
-              duration,
-            },
-          });
+          if (dbTaskId) {
+            void archiveTask({
+              prompt,
+              images: archiveImages,
+              videos: archiveVideos,
+              audios: archiveAudios,
+              meta: {
+                taskId: dbTaskId,
+                submittedAt: new Date().toISOString(),
+                model,
+                ratio,
+                duration,
+              },
+            });
+          }
           // 提交成功 → 把当前配置写入"最近历史"，并清掉 draft
           void (async () => {
             try {

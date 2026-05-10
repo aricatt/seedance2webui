@@ -379,7 +379,17 @@ export async function fileToAssetSnapshot(
   } else if (kind === 'video') {
     thumbDataUrl = await videoFileToThumb(file);
   }
-  const blobHash = await putBlobIfAbsent(file);
+  // Web Crypto (SHA-256) 仅在「安全上下文」可用：HTTPS 或 http://localhost / 127.0.0.1。
+  // 用局域网 IP / 主机名 + HTTP 开发时 subtle 不可用，此处抛错会导致整条快照失败 → 最近历史、草稿都不写入。
+  let blobHash: string | undefined;
+  try {
+    blobHash = await putBlobIfAbsent(file);
+  } catch (e) {
+    console.warn(
+      '[preset] Blob 哈希或入库失败（多为非安全上下文无法使用 crypto.subtle）；仍将保存参数与缩略图，重新加载时需手动重选素材。',
+      e,
+    );
+  }
   return {
     kind,
     name: file.name,
