@@ -31,6 +31,8 @@ export type ModelId =
 export interface User {
   id: number;
   email: string;
+  /** 展示名；ModelToo 登录时由服务端从 MT 同步 */
+  displayName?: string;
   role: 'user' | 'admin';
   status: 'active' | 'disabled';
   credits: number;
@@ -422,6 +424,7 @@ export interface DownloadTask {
   created_at: string;
   completed_at?: string;
   project_name?: string;
+  /** 创建人展示：集成 creator_label，否则「display_name (账号)」或仅账号 */
   user_email?: string;
   hasHistory: boolean;
   model_type: 'image' | 'video';

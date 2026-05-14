@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import * as downloadService from '../services/downloadService';
+import type { DownloadScopePayload } from '../services/downloadService';
 import type { DownloadTask } from '../types/index';
 import { useToast } from '../components/Toast';
 import { useApp } from '../context/AppContext';
@@ -60,6 +61,9 @@ export default function DownloadManagementPage() {
   const [generatingTasks, setGeneratingTasks] = useState<GeneratingTask[]>([]);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [detail, setDetail] = useState<DetailState | null>(null);
+  const [downloadScope, setDownloadScope] = useState<DownloadScopePayload | null>(null);
+  /** null = 全员（管理员 / 组长默认） */
+  const [downloadFilterUserId, setDownloadFilterUserId] = useState<number | null>(null);
 
   // Esc 关闭详情/预览
   useEffect(() => {
@@ -73,6 +77,27 @@ export default function DownloadManagementPage() {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [detail, preview]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await downloadService.fetchDownloadScope();
+        if (cancelled) return;
+        setDownloadScope(data);
+        setDownloadFilterUserId(
+          data.defaultFilterUserId === undefined || data.defaultFilterUserId === null
+            ? null
+            : data.defaultFilterUserId
+        );
+      } catch (e) {
+        console.error('加载下载筛选范围失败:', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const toGeneratingTasks = (items: Array<{ taskId: number; historyId: string; createdAt: string }> = []) =>
     items.map((task) => {
@@ -113,7 +138,9 @@ export default function DownloadManagementPage() {
   const loadTasks = useCallback(async () => {
     setState((prev) => ({ ...prev, isLoading: true }));
     try {
-      const result = await downloadService.getDownloadTasks(statusFilter, typeFilter, page, pageSize);
+      const result = await downloadService.getDownloadTasks(statusFilter, typeFilter, page, pageSize, {
+        filterUserId: downloadFilterUserId,
+      });
       setState((prev) => ({
         ...prev,
         tasks: result.tasks,
@@ -124,7 +151,7 @@ export default function DownloadManagementPage() {
       toast.error(`加载任务列表失败：${error instanceof Error ? error.message : error}`);
       setState((prev) => ({ ...prev, isLoading: false }));
     }
-  }, [statusFilter, typeFilter, page, pageSize]);
+  }, [statusFilter, typeFilter, page, pageSize, downloadFilterUserId]);
 
   const refreshGeneratingState = useCallback(async ({
     showSummary = false,
@@ -136,7 +163,9 @@ export default function DownloadManagementPage() {
     silentError?: boolean;
   } = {}) => {
     try {
-      const result = await downloadService.refreshDownloadTasks();
+      const result = await downloadService.refreshDownloadTasks({
+        filterUserId: downloadFilterUserId,
+      });
       setGeneratingTasks(toGeneratingTasks(result.generatingTasks ?? []));
       await loadTasks();
 
@@ -153,7 +182,7 @@ export default function DownloadManagementPage() {
       }
       throw error;
     }
-  }, [loadTasks]);
+  }, [loadTasks, downloadFilterUserId]);
 
   useEffect(() => {
     const initializeOrLoad = async () => {
@@ -462,6 +491,31 @@ export default function DownloadManagementPage() {
         </div>
       )}
 
+      {/* 下载范围说明（组长 / 组员匹配情况；无需找浏览器控制台里的 [download-scope]） */}
+      {downloadScope?.scopeDiagnostics && downloadScope.viewerRole !== 'admin' && (
+        <div className="mb-3 text-xs text-amber-200/90 bg-amber-500/10 border border-amber-500/25 rounded-lg px-3 py-2 space-y-1 max-w-4xl">
+          <div className="text-amber-100/80">
+            当前登录标识（users.email 列）: <span className="font-mono">{downloadScope.scopeDiagnostics.loginIdentifier}</span>
+            {' · '}
+            ModelToo: {downloadScope.scopeDiagnostics.modelTooApiConfigured ? '已配置' : '未配置'}
+            {downloadScope.scopeDiagnostics.groupsFetchedCount != null &&
+              ` · 拉取分组数 ${downloadScope.scopeDiagnostics.groupsFetchedCount}`}
+            {downloadScope.scopeDiagnostics.isLeaderInModelToo
+              ? ` · 在 ModelToo 中识别为组长（${downloadScope.scopeDiagnostics.ledGroupsCount} 个组，组内共 ${downloadScope.scopeDiagnostics.modelTooMemberCount} 人）`
+              : ' · 在 ModelToo 中未识别为组长'}
+            {` · 本地已匹配账号数 ${downloadScope.scopeDiagnostics.mappedLocalUserCount}`}
+          </div>
+          {downloadScope.scopeDiagnostics.tips.length > 0 && (
+            <ul className="list-disc pl-4 text-amber-200/80">
+              {downloadScope.scopeDiagnostics.tips.map((t, i) => (
+                <li key={i}>{t}</li>
+              ))}
+            </ul>
+          )}
+          <p className="text-gray-500">{downloadScope.scopeDiagnostics.serverLogHint}</p>
+        </div>
+      )}
+
       {/* 筛选器和操作栏 */}
       <div className="mb-4 flex flex-wrap gap-3 items-center justify-between">
         <div className="flex gap-2">
@@ -487,6 +541,37 @@ export default function DownloadManagementPage() {
             <option value="video">视频</option>
             <option value="image">图片</option>
           </select>
+
+          {downloadScope?.viewerRole === 'member' ? (
+            <span className="px-3 py-1.5 text-sm text-gray-400 border border-gray-700 rounded-md bg-[#1c1f2e]/80">
+              用户：{downloadScope.filterOptions[0]?.label ?? currentUser?.email ?? '—'}
+            </span>
+          ) : downloadScope ? (
+            <select
+              value={downloadFilterUserId === null ? '' : String(downloadFilterUserId)}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === '') setDownloadFilterUserId(null);
+                else {
+                  const n = parseInt(v, 10);
+                  setDownloadFilterUserId(Number.isFinite(n) ? n : null);
+                }
+                setState((prev) => ({ ...prev, page: 1 }));
+              }}
+              className="px-3 py-1.5 border border-gray-700 rounded-md text-sm bg-[#1c1f2e] text-gray-300 focus:outline-none focus:border-purple-500 min-w-[200px]"
+              title={
+                downloadScope.viewerRole === 'leader'
+                  ? '组长默认查看本组已在 SD 登录过的成员；未匹配的 ModelToo 成员不会出现在列表中'
+                  : '按用户筛选下载任务'
+              }
+            >
+              {downloadScope.filterOptions.map((opt) => (
+                <option key={opt.id === null ? '__all__' : opt.id} value={opt.id === null ? '' : String(opt.id)}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          ) : null}
         </div>
 
         <div className="flex gap-2">

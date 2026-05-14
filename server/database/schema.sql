@@ -7,7 +7,8 @@
 -- 用户表
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  email TEXT UNIQUE NOT NULL,
+  email TEXT UNIQUE NOT NULL, -- 登录账号字符串（账号名或邮箱均可；未改名 migration，仅语义）
+  display_name TEXT NOT NULL DEFAULT '', -- 展示名；ModelToo 登录时同步自 MT 的 display_name / username
   password_hash TEXT NOT NULL,
   role TEXT DEFAULT 'user' CHECK (role IN ('user', 'admin')),
   status TEXT DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
@@ -74,8 +75,8 @@ CREATE INDEX IF NOT EXISTS idx_email_verification_codes_expires_at ON email_veri
 
 
 -- 插入默认管理员账户 (密码：admin123456)
-INSERT OR IGNORE INTO users (email, password_hash, role, status, credits)
-VALUES ('admin@seedance.com', '9e5f160f7992eda2696de915f2f8f90bb3c372555bf686a1f0363ea5df9511ff', 'admin', 'active', 1000);
+INSERT OR IGNORE INTO users (email, display_name, password_hash, role, status, credits)
+VALUES ('admin@seedance.com', '', '9e5f160f7992eda2696de915f2f8f90bb3c372555bf686a1f0363ea5df9511ff', 'admin', 'active', 1000);
 
 -- ============================================
 -- 原有业务表结构

@@ -3,6 +3,42 @@ import { getAuthHeaders } from './authService';
 
 const API_BASE = '/api';
 
+export interface DownloadScopeOption {
+  id: number | null;
+  label: string;
+}
+
+export interface DownloadScopeDiagnostics {
+  loginIdentifier: string;
+  modelTooApiConfigured: boolean;
+  groupsFetchedCount: number | null;
+  isLeaderInModelToo: boolean;
+  ledGroupsCount: number;
+  modelTooMemberCount: number;
+  mappedLocalUserCount: number;
+  usedFallbackUuidScan: boolean;
+  tips: string[];
+  serverLogHint: string;
+}
+
+export interface DownloadScopePayload {
+  viewerRole: 'admin' | 'leader' | 'member';
+  defaultFilterUserId: number | null;
+  filterOptions: DownloadScopeOption[];
+  scopeDiagnostics: DownloadScopeDiagnostics | null;
+}
+
+export async function fetchDownloadScope(): Promise<DownloadScopePayload> {
+  const response = await fetch(`${API_BASE}/download/scope`, {
+    headers: getAuthHeaders(),
+  });
+  const result: ApiResponse<DownloadScopePayload> = await response.json();
+  if (!response.ok || !result.success) {
+    throw new Error(result.error || '获取下载筛选范围失败');
+  }
+  return result.data!;
+}
+
 function buildBrowserDownloadUrl(path: string): string {
   return `${path}${path.includes('?') ? '&' : '?'}t=${Date.now()}`;
 }
@@ -67,7 +103,8 @@ export async function getDownloadTasks(
   status: string = 'all',
   type: string = 'all',
   page: number = 1,
-  pageSize: number = 20
+  pageSize: number = 20,
+  opts?: { filterUserId?: number | null }
 ): Promise<DownloadTaskList> {
   const params = new URLSearchParams({
     status,
@@ -75,12 +112,15 @@ export async function getDownloadTasks(
     page: page.toString(),
     pageSize: pageSize.toString(),
   });
+  if (opts?.filterUserId != null && Number.isFinite(opts.filterUserId)) {
+    params.set('user_id', String(opts.filterUserId));
+  }
 
   const response = await fetch(`${API_BASE}/download/tasks?${params}`, {
     headers: getAuthHeaders(),
   });
   const result: ApiResponse<DownloadTaskList> = await response.json();
-  if (!result.success) {
+  if (!response.ok || !result.success) {
     throw new Error(result.error || '获取下载任务列表失败');
   }
   return result.data!;
@@ -189,7 +229,9 @@ export async function deleteTask(taskId: number): Promise<void> {
 /**
  * 刷新下载任务列表（获取已生成的视频）
  */
-export async function refreshDownloadTasks(): Promise<{
+export async function refreshDownloadTasks(opts?: {
+  filterUserId?: number | null;
+}): Promise<{
   refreshed: number;
   total: number;
   generating?: number;
@@ -199,7 +241,11 @@ export async function refreshDownloadTasks(): Promise<{
     createdAt: string;
   }>;
 }> {
-  const response = await fetch(`${API_BASE}/download/refresh`, {
+  let url = `${API_BASE}/download/refresh`;
+  if (opts?.filterUserId != null && Number.isFinite(opts.filterUserId)) {
+    url += `?user_id=${encodeURIComponent(String(opts.filterUserId))}`;
+  }
+  const response = await fetch(url, {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
   });
@@ -213,7 +259,7 @@ export async function refreshDownloadTasks(): Promise<{
       createdAt: string;
     }>;
   }> = await response.json();
-  if (!result.success) {
+  if (!response.ok || !result.success) {
     throw new Error(result.error || '刷新任务列表失败');
   }
   return result.data!;

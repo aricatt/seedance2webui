@@ -2,6 +2,18 @@ import type { User, LoginCredentials, RegisterCredentials, AuthResponse } from '
 
 const API_BASE = '/api';
 
+/** 代理错误或后端崩溃时常返回空 body，避免 response.json() 抛 SyntaxError */
+async function parseResponseJson(response: Response): Promise<Record<string, unknown> | null> {
+  const text = await response.text();
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 获取存储的 Session ID
  */
@@ -100,18 +112,24 @@ export async function login(credentials: LoginCredentials): Promise<AuthResponse
     body: JSON.stringify(credentials),
   });
 
-  const data = await response.json();
+  const data = await parseResponseJson(response);
 
   if (!response.ok) {
-    throw new Error(data.error || '登录失败');
+    const msg =
+      (data?.error as string) ||
+      `登录失败（HTTP ${response.status}）。请确认 ModelTooSD 后端已启动，且项目根 .env 里的 PORT 与 Vite 读取的一致（开发模式下 vite.config 会从 .env 同步代理端口）`;
+    throw new Error(msg);
   }
 
-  if (data.data) {
-    setSessionId(data.data.sessionId);
-    cacheUser(data.data.user);
+  if (!data?.data) {
+    throw new Error((data?.error as string) || '登录失败：服务器返回无效数据');
   }
 
-  return data.data;
+  const payload = data.data as AuthResponse;
+  setSessionId(payload.sessionId);
+  cacheUser(payload.user);
+
+  return payload;
 }
 
 /**
@@ -151,14 +169,14 @@ export async function getCurrentUser(): Promise<User | null> {
       },
     });
 
-    const data = await response.json();
+    const data = await parseResponseJson(response);
 
-    if (!response.ok || !data.success) {
+    if (!data || !response.ok || !data.success) {
       removeSessionId();
       return null;
     }
 
-    const user = data.data.user;
+    const user = (data.data as { user: User }).user;
     cacheUser(user);
     return user;
   } catch (error) {
@@ -357,13 +375,20 @@ export async function checkEmailStatus(email: string): Promise<{ isRegistered: b
     body: JSON.stringify({ email }),
   });
 
-  const data = await response.json();
+  const data = await parseResponseJson(response);
 
   if (!response.ok) {
-    throw new Error(data.error || '检查邮箱状态失败');
+    throw new Error(
+      (data?.error as string) ||
+        `检查邮箱状态失败（HTTP ${response.status}）。请确认后端已启动且端口与 Vite 代理一致`
+    );
   }
 
-  return data.data;
+  if (!data?.data) {
+    throw new Error('检查邮箱状态失败：服务器返回无效数据');
+  }
+
+  return data.data as { isRegistered: boolean };
 }
 
 /**
@@ -467,6 +492,7 @@ export async function getUserList(
 export async function adminCreateUser(payload: {
   email: string;
   password: string;
+  displayName?: string;
   role?: 'user' | 'admin';
   credits?: number;
   status?: 'active' | 'disabled';

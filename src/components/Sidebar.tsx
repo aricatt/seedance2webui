@@ -164,7 +164,7 @@ export default function Sidebar({ currentUser, onLogout }: SidebarProps) {
                 </div>
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-white truncate">
-                    {currentUser?.email || '用户'}
+                    {currentUser?.displayName?.trim() || currentUser?.email || '用户'}
                   </p>
                   <p className="text-xs text-gray-500">
                     {currentUser?.role === 'admin' ? '管理员' : '普通用户'}

@@ -10,6 +10,30 @@ import { getDatabase } from '../database/index.js';
 // Session 有效期：7 天
 const SESSION_EXPIRY_DAYS = 7;
 
+const DISPLAY_NAME_MAX = 120;
+
+export function clampDisplayName(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  return s.length > DISPLAY_NAME_MAX ? s.slice(0, DISPLAY_NAME_MAX) : s;
+}
+
+/** API 返回给前端的用户对象（camelCase） */
+function toPublicUser(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    email: row.email,
+    displayName: String(row.display_name ?? '').trim(),
+    role: row.role,
+    status: row.status,
+    credits: row.credits,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastCheckInAt: row.last_check_in_at,
+  };
+}
+
 // 邮件传输器缓存
 let cachedMailTransporter = null;
 let cachedMailTransporterKey = '';
@@ -190,8 +214,8 @@ export async function registerUser(email, password, emailCode) {
   // 创建用户
   const passwordHash = hashPassword(password);
   const result = db.prepare(`
-    INSERT INTO users (email, password_hash, role, status, credits)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO users (email, display_name, password_hash, role, status, credits)
+    VALUES (?, '', ?, ?, ?, ?)
   `).run(email, passwordHash, 'user', 'active', 10);
 
   // 创建 session
@@ -205,21 +229,14 @@ export async function registerUser(email, password, emailCode) {
 
   // 获取用户信息
   const user = db.prepare(`
-    SELECT id, email, role, status, credits, created_at
+    SELECT id, email, display_name, role, status, credits, created_at
     FROM users
     WHERE id = ?
   `).get(result.lastInsertRowid);
 
   return {
     sessionId,
-    user: {
-      id: user.id,
-      email: user.email,
-      role: user.role,
-      status: user.status,
-      credits: user.credits,
-      createdAt: user.created_at
-    }
+    user: toPublicUser(user),
   };
 }
 
@@ -247,6 +264,7 @@ export function createUserByAdmin(email, password, opts = {}) {
   const credits = Number.isFinite(Number(opts.credits))
     ? Math.max(0, Math.floor(Number(opts.credits)))
     : 10;
+  const displayName = clampDisplayName(opts.displayName ?? opts.display_name);
 
   const existing = db.prepare(`SELECT id FROM users WHERE email = ?`).get(email);
   if (existing) throw new Error('该账号已被注册');
@@ -254,26 +272,19 @@ export function createUserByAdmin(email, password, opts = {}) {
   const passwordHash = hashPassword(password);
   const result = db
     .prepare(
-      `INSERT INTO users (email, password_hash, role, status, credits)
-       VALUES (?, ?, ?, ?, ?)`
+      `INSERT INTO users (email, display_name, password_hash, role, status, credits)
+       VALUES (?, ?, ?, ?, ?, ?)`
     )
-    .run(email, passwordHash, role, status, credits);
+    .run(email, displayName, passwordHash, role, status, credits);
 
   const user = db
     .prepare(
-      `SELECT id, email, role, status, credits, created_at
+      `SELECT id, email, display_name, role, status, credits, created_at
        FROM users WHERE id = ?`
     )
     .get(result.lastInsertRowid);
 
-  return {
-    id: user.id,
-    email: user.email,
-    role: user.role,
-    status: user.status,
-    credits: user.credits,
-    createdAt: user.created_at,
-  };
+  return toPublicUser(user);
 }
 
 /**
@@ -289,7 +300,7 @@ export async function loginUser(email, password) {
 
   // 查找用户
   const user = db.prepare(`
-    SELECT id, email, password_hash, role, status, credits
+    SELECT id, email, display_name, password_hash, role, status, credits
     FROM users
     WHERE email = ?
   `).get(email);
@@ -321,13 +332,7 @@ export async function loginUser(email, password) {
 
   return {
     sessionId,
-    user: {
-      id: user.id,
-      email: user.email,
-      role: user.role,
-      status: user.status,
-      credits: user.credits
-    }
+    user: toPublicUser(user),
   };
 }
 
@@ -347,7 +352,8 @@ export async function getCurrentUser(sessionId) {
   const db = getDatabase();
 
   const session = db.prepare(`
-    SELECT s.*, u.id as user_id, u.email, u.role, u.status, u.credits
+    SELECT s.*, u.id as user_id, u.email, u.display_name, u.role, u.status, u.credits,
+           u.created_at, u.updated_at, u.last_check_in_at
     FROM sessions s
     JOIN users u ON s.user_id = u.id
     WHERE s.session_id = ? AND s.expires_at > datetime('now')
@@ -357,13 +363,17 @@ export async function getCurrentUser(sessionId) {
     return null;
   }
 
-  return {
+  return toPublicUser({
     id: session.user_id,
     email: session.email,
+    display_name: session.display_name,
     role: session.role,
     status: session.status,
-    credits: session.credits
-  };
+    credits: session.credits,
+    created_at: session.created_at,
+    updated_at: session.updated_at,
+    last_check_in_at: session.last_check_in_at,
+  });
 }
 
 /**
@@ -667,7 +677,7 @@ export async function getUserList(page = 1, pageSize = 20, filters = {}) {
   }
 
   const users = db.prepare(`
-    SELECT id, email, role, status, credits, created_at, last_check_in_at
+    SELECT id, email, display_name, role, status, credits, created_at, last_check_in_at
     FROM users
     WHERE ${whereClause}
     ORDER BY created_at DESC
@@ -679,7 +689,16 @@ export async function getUserList(page = 1, pageSize = 20, filters = {}) {
   `).get(...params).count;
 
   return {
-    users,
+    users: users.map((row) => ({
+      id: row.id,
+      email: row.email,
+      displayName: String(row.display_name ?? '').trim(),
+      role: row.role,
+      status: row.status,
+      credits: row.credits,
+      created_at: row.created_at,
+      last_check_in_at: row.last_check_in_at,
+    })),
     pagination: {
       page,
       pageSize,
@@ -696,7 +715,7 @@ export async function getUserDetail(userId) {
   const db = getDatabase();
 
   const user = db.prepare(`
-    SELECT id, email, role, status, credits, created_at, updated_at, last_check_in_at
+    SELECT id, email, display_name, role, status, credits, created_at, updated_at, last_check_in_at
     FROM users
     WHERE id = ?
   `).get(userId);
@@ -710,7 +729,7 @@ export async function getUserDetail(userId) {
   `).get(userId).count;
 
   return {
-    ...user,
+    ...toPublicUser(user),
     totalCheckIns: checkInCount
   };
 }

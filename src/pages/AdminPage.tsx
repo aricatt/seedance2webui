@@ -46,11 +46,24 @@ export default function AdminPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createForm, setCreateForm] = useState<{
     email: string;
+    displayName: string;
     password: string;
     role: 'user' | 'admin';
     credits: string;
-  }>({ email: '', password: '', role: 'user', credits: '10' });
+  }>({ email: '', displayName: '', password: '', role: 'user', credits: '10' });
   const [creating, setCreating] = useState(false);
+
+  // 统计数据 Tab
+  const [activeTab, setActiveTab] = useState<'users' | 'stats'>('users');
+  const [statsTimeRange, setStatsTimeRange] = useState<'7' | '30' | '90' | 'all'>('all'); // 默认显示全部历史数据
+  const [statsGroupFilter, setStatsGroupFilter] = useState<string>(''); // group id from ModelToo
+
+  // 真实统计数据
+  const [generationStats, setGenerationStats] = useState<any>(null);
+  const [errorDistribution, setErrorDistribution] = useState<any>(null);
+  const [loadingStats, setLoadingStats] = useState(false);
+  const [modelTooGroups, setModelTooGroups] = useState<{ id: string; name: string }[]>([]);
+  const [groupsLoadError, setGroupsLoadError] = useState<string>('');
 
   const loadStats = async () => {
     try {
@@ -88,6 +101,85 @@ export default function AdminPage() {
   useEffect(() => {
     loadUsers(1);
   }, [filterStatus, filterRole]);
+
+  const loadModelTooGroups = async () => {
+    const sessionId = localStorage.getItem('seedance_session_id') || '';
+    try {
+      const res = await fetch('/api/admin/modeltoo/groups', {
+        headers: { 'X-Session-ID': sessionId },
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        const msg =
+          typeof j.error === 'string' && j.error.trim()
+            ? j.error
+            : `分组列表加载失败 (${res.status})`;
+        setGroupsLoadError(msg);
+        setModelTooGroups([]);
+        toast.error(msg);
+        return;
+      }
+      setGroupsLoadError('');
+      const j = await res.json();
+      const items = (j.data || []) as { id: string; name: string }[];
+      setModelTooGroups(items.map((g) => ({ id: String(g.id), name: g.name || String(g.id) })));
+    } catch {
+      setGroupsLoadError('分组列表网络错误');
+      setModelTooGroups([]);
+    }
+  };
+
+  // 加载生成统计数据
+  const loadGenerationStats = async () => {
+    try {
+      setLoadingStats(true);
+      const days = statsTimeRange === 'all' ? 0 : parseInt(statsTimeRange, 10);
+      const sessionId = localStorage.getItem('seedance_session_id') || '';
+      const gid = statsGroupFilter.trim();
+      const q = new URLSearchParams({ days: String(days) });
+      if (gid) q.set('group_id', gid);
+
+      const [genRes, errRes] = await Promise.all([
+        fetch(`/api/admin/stats/generation?${q}`, { headers: { 'X-Session-ID': sessionId } }),
+        fetch(`/api/admin/stats/error-distribution?${q}`, { headers: { 'X-Session-ID': sessionId } }),
+      ]);
+
+      const parseErr = async (res: Response, fallback: string) => {
+        try {
+          const j = (await res.json()) as { error?: string };
+          return typeof j?.error === 'string' && j.error.trim() ? j.error : fallback;
+        } catch {
+          return fallback;
+        }
+      };
+      if (!genRes.ok) throw new Error(await parseErr(genRes, '加载生成统计失败'));
+      if (!errRes.ok) throw new Error(await parseErr(errRes, '加载失败分布失败'));
+
+      const genJson = await genRes.json();
+      const errJson = await errRes.json();
+
+      setGenerationStats(genJson.data);
+      setErrorDistribution(errJson.data);
+    } catch (err) {
+      console.error(err);
+      toast.error(err instanceof Error ? err.message : '加载生成统计失败');
+    } finally {
+      setLoadingStats(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'stats') {
+      loadModelTooGroups();
+    }
+  }, [activeTab]);
+
+  // 当切换到统计 Tab 或筛选条件变化时加载数据
+  useEffect(() => {
+    if (activeTab === 'stats') {
+      loadGenerationStats();
+    }
+  }, [activeTab, statsTimeRange, statsGroupFilter]);
 
   const handleStatusChange = async (userId: number, newStatus: 'active' | 'disabled') => {
     try {
@@ -150,14 +242,16 @@ export default function AdminPage() {
     try {
       setCreating(true);
       const credits = Number(createForm.credits);
+      const displayName = createForm.displayName.trim();
       await adminCreateUser({
         email,
         password,
+        ...(displayName ? { displayName } : {}),
         role: createForm.role,
         credits: Number.isFinite(credits) ? credits : 10,
       });
       setShowCreateModal(false);
-      setCreateForm({ email: '', password: '', role: 'user', credits: '10' });
+      setCreateForm({ email: '', displayName: '', password: '', role: 'user', credits: '10' });
       loadUsers(1);
       loadStats();
       toast.success(`已创建用户 ${email}`);
@@ -213,8 +307,32 @@ export default function AdminPage() {
           <p className="text-gray-400">管理系统用户和查看系统统计</p>
         </div>
 
-        {/* 统计卡片 */}
-        {stats && (
+        {/* Tab 导航 */}
+        <div className="flex gap-2 mb-6 border-b border-gray-800">
+          <button
+            onClick={() => setActiveTab('users')}
+            className={`px-6 py-3 text-sm font-medium transition-all ${
+              activeTab === 'users'
+                ? 'text-white border-b-2 border-purple-500'
+                : 'text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            用户管理
+          </button>
+          <button
+            onClick={() => setActiveTab('stats')}
+            className={`px-6 py-3 text-sm font-medium transition-all ${
+              activeTab === 'stats'
+                ? 'text-white border-b-2 border-purple-500'
+                : 'text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            统计数据
+          </button>
+        </div>
+
+        {/* 统计卡片（仅在用户管理 Tab 显示） */}
+        {activeTab === 'users' && stats && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
             <StatCard
               title="总用户数"
@@ -255,7 +373,8 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* 用户列表 */}
+        {/* 用户列表（仅在用户管理 Tab 显示） */}
+        {activeTab === 'users' && (
         <div className="bg-[#1c1f2e] border border-gray-800 rounded-2xl overflow-hidden">
           <div className="p-6 border-b border-gray-800">
             <div className="flex items-center justify-between flex-wrap gap-4">
@@ -314,6 +433,9 @@ export default function AdminPage() {
                         账号
                       </th>
                       <th className="px-6 py-4 text-left text-xs font-medium text-gray-400 uppercase">
+                        显示名
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-medium text-gray-400 uppercase">
                         角色
                       </th>
                       <th className="px-6 py-4 text-left text-xs font-medium text-gray-400 uppercase">
@@ -335,6 +457,9 @@ export default function AdminPage() {
                       <tr key={user.id} className="hover:bg-[#0f111a]/50">
                         <td className="px-6 py-4 text-sm text-gray-400">#{user.id}</td>
                         <td className="px-6 py-4 text-sm text-white">{user.email}</td>
+                        <td className="px-6 py-4 text-sm text-gray-300">
+                          {user.displayName?.trim() || '—'}
+                        </td>
                         <td className="px-6 py-4 text-sm">
                           <span className={`px-2 py-1 rounded-lg text-xs font-medium ${
                             user.role === 'admin'
@@ -411,6 +536,200 @@ export default function AdminPage() {
             </>
           )}
         </div>
+        )}
+
+        {/* 统计数据 Tab 内容 */}
+        {activeTab === 'stats' && (
+          <div className="space-y-6">
+            {/* 筛选工具栏 */}
+            <div className="bg-[#1c1f2e] border border-gray-800 rounded-2xl p-4">
+              <div className="flex flex-wrap items-center gap-4">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">时间范围</label>
+                  <select
+                    value={statsTimeRange}
+                    onChange={(e) => setStatsTimeRange(e.target.value as any)}
+                    className="px-4 py-2 bg-[#0f111a] border border-gray-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  >
+                    <option value="7">最近 7 天</option>
+                    <option value="30">最近 30 天</option>
+                    <option value="90">最近 90 天</option>
+                    <option value="all">全部时间</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">分组筛选（ModelToo）</label>
+                  <select
+                    value={statsGroupFilter}
+                    onChange={(e) => setStatsGroupFilter(e.target.value)}
+                    className="px-4 py-2 bg-[#0f111a] border border-gray-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 min-w-[200px]"
+                  >
+                    <option value="">全部分组</option>
+                    {modelTooGroups.map((g) => (
+                      <option key={g.id} value={g.id}>
+                        {g.name}
+                      </option>
+                    ))}
+                  </select>
+                  {groupsLoadError ? (
+                    <p className="text-xs text-amber-400 mt-1 max-w-xs">{groupsLoadError}</p>
+                  ) : null}
+                  {generationStats?.groupFilter?.groupId ? (
+                    <p className="text-xs text-gray-500 mt-1">
+                      ModelToo 成员 {generationStats.groupFilter.modelTooMemberCount ?? '?'} 人 · 本地已匹配{' '}
+                      {generationStats.groupFilter.matchedLocalUsers} 人（按用户名或邮箱与 SD 的 users.email 对齐）
+                      {(generationStats.groupFilter.modelTooMemberCount ?? 0) > 0 &&
+                      generationStats.groupFilter.matchedLocalUsers === 0 ? (
+                        <span className="block text-amber-400 mt-1">
+                          未匹配到本地账号：请让组成员至少用同一登录名/邮箱登录过一次 SD，以便写入本地 users 表。
+                        </span>
+                      ) : null}
+                    </p>
+                  ) : null}
+                </div>
+
+                <button
+                  onClick={loadGenerationStats}
+                  disabled={loadingStats}
+                  className="mt-5 px-5 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-sm font-medium rounded-xl transition-all"
+                >
+                  刷新数据
+                </button>
+              </div>
+            </div>
+
+            {/* KPI 卡片 - 视频生成维度（真实数据，显示全部历史） */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <div className="bg-[#1c1f2e] border border-gray-800 rounded-2xl p-6">
+                <p className="text-gray-400 text-sm mb-1">总生成视频数</p>
+                <p className="text-3xl font-bold text-white">{generationStats?.summary?.totalVideos ?? 0}</p>
+                <p className="text-xs text-emerald-400 mt-1">成功 {generationStats?.summary?.successVideos ?? 0} 个</p>
+              </div>
+              <div className="bg-[#1c1f2e] border border-gray-800 rounded-2xl p-6">
+                <p className="text-gray-400 text-sm mb-1">总任务数</p>
+                <p className="text-3xl font-bold text-white">{generationStats?.summary?.totalTasks ?? 0}</p>
+              </div>
+              <div className="bg-[#1c1f2e] border border-gray-800 rounded-2xl p-6">
+                <p className="text-gray-400 text-sm mb-1">成功率</p>
+                <p className="text-3xl font-bold text-white">{generationStats?.summary?.successRate ?? 0}%</p>
+              </div>
+              <div className="bg-[#1c1f2e] border border-gray-800 rounded-2xl p-6">
+                <p className="text-gray-400 text-sm mb-1">活跃创作者</p>
+                <p className="text-3xl font-bold text-white">{generationStats?.summary?.activeUsers ?? 0}</p>
+              </div>
+            </div>
+
+            {/* 失败统计（按阶段，只显示总数） */}
+            {errorDistribution && (
+              <div className="bg-[#1c1f2e] border border-gray-800 rounded-2xl overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-800">
+                  <h3 className="text-lg font-semibold text-white">失败统计（按阶段）</h3>
+                  <p className="text-sm text-gray-400 mt-1">基于你数据库中所有历史数据</p>
+                </div>
+
+                <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="bg-[#0f111a] rounded-2xl p-5">
+                    <div className="text-sm text-gray-400">提交阶段失败</div>
+                    <div className="text-3xl font-bold text-red-400 mt-1">
+                      {errorDistribution.submissionFailures?.reduce((s: number, i: any) => s + i.count, 0) || 0}
+                    </div>
+                    <div className="text-xs text-gray-500 mt-1">参考图过大、敏感内容、欠费等</div>
+                  </div>
+
+                  <div className="bg-[#0f111a] rounded-2xl p-5">
+                    <div className="text-sm text-gray-400">生成阶段失败</div>
+                    <div className="text-3xl font-bold text-amber-400 mt-1">
+                      {errorDistribution.generationFailures?.reduce((s: number, i: any) => s + i.count, 0) || 0}
+                    </div>
+                    <div className="text-xs text-gray-500 mt-1">超时、真实人物、版权限制等</div>
+                  </div>
+
+                  <div className="bg-[#0f111a] rounded-2xl p-5">
+                    <div className="text-sm text-gray-400">下载阶段失败</div>
+                    <div className="text-3xl font-bold text-orange-400 mt-1">
+                      {errorDistribution.downloadFailedCount || 0}
+                    </div>
+                    <div className="text-xs text-gray-500 mt-1">生成成功但下载失败</div>
+                  </div>
+                </div>
+
+                <div className="px-6 pb-6 text-xs text-gray-400">
+                  总失败任务数：{errorDistribution.totalErrorTasks}
+                </div>
+              </div>
+            )}
+
+            {/* 按用户统计表（真实数据） */}
+            <div className="bg-[#1c1f2e] border border-gray-800 rounded-2xl overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-white">按用户统计（Top 100）</h3>
+                {loadingStats && <span className="text-xs text-gray-400">加载中...</span>}
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-[#0f111a] text-gray-400">
+                    <tr>
+                      <th className="px-6 py-3 text-left">用户</th>
+                      <th className="px-6 py-3 text-right">任务数</th>
+                      <th className="px-6 py-3 text-right">生成视频</th>
+                      <th className="px-6 py-3 text-right">成功视频</th>
+                      <th className="px-6 py-3 text-right">成功率</th>
+                      <th className="px-6 py-3 text-right text-red-400">提交失败</th>
+                      <th className="px-6 py-3 text-right text-amber-400">生成失败</th>
+                      <th className="px-6 py-3 text-right text-orange-400">下载失败</th>
+                      <th className="px-6 py-3 text-left">最后活跃</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800">
+                    {generationStats?.users?.length > 0 ? (
+                      generationStats.users.map((u: any, idx: number) => (
+                        <tr key={idx} className="hover:bg-[#0f111a]/60">
+                          <td className="px-6 py-3 text-white font-medium">
+                            {u.displayName?.trim()
+                              ? `${u.displayName} (${u.email})`
+                              : u.email}
+                          </td>
+                          <td className="px-6 py-3 text-right text-gray-300">{u.taskCount}</td>
+                          <td className="px-6 py-3 text-right text-white font-semibold">{u.videoCount}</td>
+                          <td className="px-6 py-3 text-right text-emerald-400">{u.successVideoCount}</td>
+                          <td className="px-6 py-3 text-right">
+                            <span className={`px-2 py-0.5 rounded text-xs ${u.successRate > 80 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
+                              {u.successRate}%
+                            </span>
+                          </td>
+                          {/* 新增三列失败统计 */}
+                          <td className="px-6 py-3 text-right text-red-400 font-medium">{u.submissionFailureCount ?? 0}</td>
+                          <td className="px-6 py-3 text-right text-amber-400 font-medium">{u.generationFailureCount ?? 0}</td>
+                          <td className="px-6 py-3 text-right text-orange-400 font-medium">{u.downloadFailureCount ?? 0}</td>
+                          <td className="px-6 py-3 text-gray-400 text-xs">
+                            {u.lastActive ? new Date(u.lastActive).toLocaleDateString() : '-'}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={9} className="px-6 py-8 text-center text-gray-400">
+                          {loadingStats ? '加载中...' : '暂无生成记录'}
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* 分组说明：汇总已通过上方「分组筛选」切换 */}
+            <div className="bg-[#1c1f2e] border border-gray-800 rounded-2xl overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-800">
+                <h3 className="text-lg font-semibold text-white">分组维度统计</h3>
+                <p className="text-sm text-gray-400 mt-1">
+                  在上方选择分组后，本页 KPI、失败统计与用户表均只统计该组成员（邮箱与本地 users 对齐）。
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* 用户编辑弹窗 */}
         {showUserModal && selectedUser && (
@@ -528,6 +847,20 @@ export default function AdminPage() {
                     className="w-full px-4 py-3 bg-[#0f111a] border border-gray-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
                     placeholder="输入账号（邮箱或用户名）"
                     autoFocus
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                    显示名（可选）
+                  </label>
+                  <input
+                    type="text"
+                    value={createForm.displayName}
+                    onChange={(e) =>
+                      setCreateForm((f) => ({ ...f, displayName: e.target.value }))
+                    }
+                    className="w-full px-4 py-3 bg-[#0f111a] border border-gray-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    placeholder="留空则仅显示账号"
                   />
                 </div>
                 <div>

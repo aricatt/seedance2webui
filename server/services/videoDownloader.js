@@ -277,8 +277,7 @@ export async function batchDownloadVideos(taskIds, baseDownloadPath) {
  * @param {string} options.type - 类型筛选
  * @param {number} options.page - 页码（从 1 开始）
  * @param {number} options.pageSize - 每页数量
- * @param {number|null} options.userId - 用户 ID，用于过滤（非管理员只能查看自己的任务）
- * @param {boolean} options.isAdmin - 是否管理员，true 时忽略 userId 过滤
+ * @param {{ type: 'all' } | { type: 'single', userId: number } | { type: 'in', userIds: number[] }} [options.userScope] - 可见用户范围
  * @returns {Object} { tasks, total, page, pageSize }
  */
 export function getDownloadTasks(options = {}) {
@@ -288,17 +287,19 @@ export function getDownloadTasks(options = {}) {
     type = 'all',
     page = 1,
     pageSize = 20,
-    userId = null,
-    isAdmin = false,
+    userScope = { type: 'all' },
   } = options;
 
   const whereClauses = ["t.task_kind = 'output'"];
   const params = [];
 
-  // 非管理员用户只能查看自己的任务
-  if (!isAdmin && userId !== null) {
+  if (userScope.type === 'single') {
     whereClauses.push('t.user_id = ?');
-    params.push(userId);
+    params.push(userScope.userId);
+  } else if (userScope.type === 'in' && Array.isArray(userScope.userIds) && userScope.userIds.length > 0) {
+    const ph = userScope.userIds.map(() => '?').join(', ');
+    whereClauses.push(`t.user_id IN (${ph})`);
+    params.push(...userScope.userIds);
   }
 
   if (status !== 'all') {
@@ -363,7 +364,11 @@ export function getDownloadTasks(options = {}) {
           ),
           ''
         ),
-        u.email
+        CASE
+          WHEN LENGTH(TRIM(COALESCE(u.display_name, ''))) > 0
+          THEN TRIM(u.display_name) || ' (' || COALESCE(u.email, '') || ')'
+          ELSE COALESCE(u.email, '')
+        END
       ) as user_email,
       CASE
         WHEN t.status = 'error' THEN 'failed'

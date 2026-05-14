@@ -13,6 +13,16 @@ import * as settingsService from './services/settingsService.js';
 import * as batchService from './services/batchScheduler.js';
 import * as videoDownloader from './services/videoDownloader.js';
 import * as authService from './services/authService.js';
+import * as statsService from './services/statsService.js';
+import { fetchModelTooGroups, fetchModelTooGroupUsers } from './services/modelTooAdminClient.js';
+import {
+  resolveDownloadTaskScope,
+  assertDownloadTaskAccessible,
+  buildDownloadScopePayload,
+  parseOptionalUserId,
+  scopeToTaskWhereClause,
+} from './services/downloadScopeService.js';
+import { findLocalUserIdForModelTooMember } from './services/modelTooLocalUserMatch.js';
 import { generateArkVideo, pollArkTaskUntilDone, bufferToDataUri } from './services/arkVideoGenerator.js';
 import { assertArkApiKeyOrExit, getArkApiKey } from './services/arkConfig.js';
 import {
@@ -39,6 +49,46 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const MODELTOO_API_URL = (process.env.MODELTOO_API_URL || '').replace(/\/+$/, '');
 
+/** 解析统计 API 的 days 参数：支持 0 表示全部时间 */
+function parseStatsDays(query) {
+  const raw = query.days;
+  if (raw === undefined || raw === '') return 30;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 30;
+}
+
+/**
+ * 根据 ModelToo 分组 ID，解析本地 SQLite 中对应用户的 id 列表。
+ * 与下载页组长范围共用 modelTooLocalUserMatch：users.email 列为历史命名，实际存登录账号名（与 ModelToo username/email 对齐）。
+ */
+async function resolveFilterUserIdsFromModelTooGroup(groupId) {
+  const gid = String(groupId || '').trim();
+  if (!gid) return null;
+  if (!MODELTOO_API_URL) {
+    throw new Error('未配置 MODELTOO_API_URL，无法按分组统计');
+  }
+  const mtUsers = await fetchModelTooGroupUsers(MODELTOO_API_URL, gid);
+  const list = Array.isArray(mtUsers) ? mtUsers : [];
+  const seen = new Set();
+  const ids = [];
+
+  for (const u of list) {
+    const localId = findLocalUserIdForModelTooMember(u);
+    if (localId != null && !seen.has(localId)) {
+      seen.add(localId);
+      ids.push(localId);
+    }
+  }
+
+  if (list.length > 0 && ids.length === 0) {
+    console.warn(
+      `[stats] 分组 ${gid} ModelToo 返回 ${list.length} 名成员，但本地 users 未匹配到任何账号（请确认 SD 用户曾用与 ModelToo 一致的账号名登录过；本地存在 users.email 列）`
+    );
+  }
+
+  return { userIds: ids, modelTooMemberCount: list.length };
+}
+
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
@@ -49,7 +99,7 @@ app.use(express.json({ limit: '50mb' }));
  * 成功返回 { success: true }，任何失败（网络/401/超时）都返回 { success: false }。
  */
 async function tryModelTooLogin(username, password) {
-  if (!MODELTOO_API_URL) return { success: false };
+  if (!MODELTOO_API_URL) return { success: false, remoteUser: null };
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
@@ -60,37 +110,65 @@ async function tryModelTooLogin(username, password) {
       signal: controller.signal,
     });
     clearTimeout(timer);
-    if (resp.ok) {
-      console.log(`[auth] ModelToo 远程验证成功: ${username}`);
-      return { success: true };
+    if (!resp.ok) {
+      console.log(`[auth] ModelToo 远程验证失败 (HTTP ${resp.status}): ${username}`);
+      return { success: false, remoteUser: null };
     }
-    console.log(`[auth] ModelToo 远程验证失败 (HTTP ${resp.status}): ${username}`);
-    return { success: false };
+    const data = await resp.json().catch(() => ({}));
+    const u = data && typeof data === 'object' ? data.user : null;
+    let remoteUser = null;
+    if (u && typeof u === 'object') {
+      remoteUser = {
+        username: String(u.username || '').trim(),
+        email: String(u.email || '').trim(),
+        display_name: String(u.display_name ?? u.displayName ?? '').trim(),
+      };
+    }
+    console.log(`[auth] ModelToo 远程验证成功: ${username}`);
+    return { success: true, remoteUser };
   } catch (err) {
     console.log(`[auth] ModelToo 远程不可用: ${err.message}`);
-    return { success: false };
+    return { success: false, remoteUser: null };
   }
 }
 
 /**
- * 将 ModelToo 验证通过的账号同步到本地 SQLite。
- * - 本地不存在 → 新建用户 (role=user, credits=10)
- * - 本地已存在 → 仅更新密码哈希
+ * 从 ModelToo 登录响应推导展示名：优先 MT display_name，否则 username。
  */
-function syncModelTooUser(username, password) {
+function displayNameFromModelTooRemote(remoteUser) {
+  if (!remoteUser || typeof remoteUser !== 'object') return '';
+  const fromProfile = String(remoteUser.display_name ?? '').trim();
+  if (fromProfile) return authService.clampDisplayName(fromProfile);
+  return authService.clampDisplayName(String(remoteUser.username ?? '').trim());
+}
+
+/**
+ * 将 ModelToo 验证通过的账号同步到本地 SQLite。
+ * - 本地不存在 → 新建用户 (role=user, credits=10)，并写入 display_name
+ * - 本地已存在 → 更新密码哈希；若有 remoteUser 则同步 display_name
+ */
+function syncModelTooUser(loginIdentifier, password, remoteUser) {
   const db = getDatabase();
-  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(username);
+  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(loginIdentifier);
   const passwordHash = authService.hashPassword(password);
+  const displayName = displayNameFromModelTooRemote(remoteUser);
   if (!existing) {
     db.prepare(
-      `INSERT INTO users (email, password_hash, role, status, credits) VALUES (?, ?, 'user', 'active', 10)`
-    ).run(username, passwordHash);
-    console.log(`[auth] 已为 ModelToo 用户 "${username}" 创建本地账号`);
+      `INSERT INTO users (email, display_name, password_hash, role, status, credits) VALUES (?, ?, ?, 'user', 'active', 10)`
+    ).run(loginIdentifier, displayName, passwordHash);
+    console.log(`[auth] 已为 ModelToo 用户 "${loginIdentifier}" 创建本地账号`);
   } else {
-    db.prepare(
-      `UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`
-    ).run(passwordHash, existing.id);
-    console.log(`[auth] 已同步 ModelToo 用户 "${username}" 的密码`);
+    if (displayName) {
+      db.prepare(
+        `UPDATE users SET password_hash = ?, display_name = ?, updated_at = datetime('now') WHERE id = ?`
+      ).run(passwordHash, displayName, existing.id);
+      console.log(`[auth] 已同步 ModelToo 用户 "${loginIdentifier}" 的密码与展示名`);
+    } else {
+      db.prepare(
+        `UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`
+      ).run(passwordHash, existing.id);
+      console.log(`[auth] 已同步 ModelToo 用户 "${loginIdentifier}" 的密码`);
+    }
   }
 }
 
@@ -189,7 +267,9 @@ const authenticate = async (req, res, next) => {
     try {
       const db = getDatabase();
       const user = db
-        .prepare('SELECT id, email, role, status, credits FROM users WHERE email = ?')
+        .prepare(
+          'SELECT id, email, display_name, role, status, credits FROM users WHERE email = ?'
+        )
         .get(email);
       if (!user) {
         return res.status(403).json({
@@ -199,7 +279,14 @@ const authenticate = async (req, res, next) => {
       if (user.status !== 'active') {
         return res.status(403).json({ error: '集成用户未启用' });
       }
-      req.user = user;
+      req.user = {
+        id: user.id,
+        email: user.email,
+        displayName: String(user.display_name ?? '').trim(),
+        role: user.role,
+        status: user.status,
+        credits: user.credits,
+      };
       req.sessionId = 'integration';
       const actor = String(req.headers['x-studio-actor'] || '').trim().slice(0, 200);
       req.studioActorLabel = actor || null;
@@ -1559,6 +1646,13 @@ function sendDownloadedVideoFile(res, result) {
 app.post('/api/download/tasks/:id/file-token', authenticate, async (req, res) => {
   try {
     const taskId = req.params.id;
+    const db = getDatabase();
+    const row = db.prepare('SELECT user_id FROM tasks WHERE id = ?').get(taskId);
+    if (!row) {
+      return res.status(404).json({ success: false, error: '任务不存在' });
+    }
+    await assertDownloadTaskAccessible(req, row.user_id);
+
     const result = videoDownloader.getDownloadedVideoFileByTaskId(taskId);
 
     if (!result.success) {
@@ -1573,7 +1667,8 @@ app.post('/api/download/tasks/:id/file-token', authenticate, async (req, res) =>
     const token = createDownloadToken(taskId, req.user.id);
     res.json({ success: true, data: { token } });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    const code = error.statusCode || 500;
+    res.status(code).json({ success: false, error: error.message });
   }
 });
 
@@ -1616,6 +1711,13 @@ app.get('/api/download/file-by-token', async (req, res) => {
 app.post('/api/download/tasks/:id/stream-token', authenticate, async (req, res) => {
   try {
     const taskId = req.params.id;
+    const db = getDatabase();
+    const row = db.prepare('SELECT user_id FROM tasks WHERE id = ?').get(taskId);
+    if (!row) {
+      return res.status(404).json({ success: false, error: '任务不存在' });
+    }
+    await assertDownloadTaskAccessible(req, row.user_id);
+
     const result = videoDownloader.getDownloadedVideoFileByTaskId(taskId);
 
     if (!result.success) {
@@ -1630,7 +1732,8 @@ app.post('/api/download/tasks/:id/stream-token', authenticate, async (req, res) 
     const token = createDownloadToken(taskId, req.user.id, 'stream');
     res.json({ success: true, data: { token } });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    const code = error.statusCode || 500;
+    res.status(code).json({ success: false, error: error.message });
   }
 });
 
@@ -1677,6 +1780,13 @@ app.get('/api/download/stream-by-token', async (req, res) => {
 app.get('/api/download/tasks/:id/file', authenticate, async (req, res) => {
   try {
     const taskId = req.params.id;
+    const db = getDatabase();
+    const row = db.prepare('SELECT user_id FROM tasks WHERE id = ?').get(taskId);
+    if (!row) {
+      return res.status(404).json({ success: false, error: '任务不存在' });
+    }
+    await assertDownloadTaskAccessible(req, row.user_id);
+
     const result = videoDownloader.getDownloadedVideoFileByTaskId(taskId);
 
     if (!result.success) {
@@ -1690,7 +1800,8 @@ app.get('/api/download/tasks/:id/file', authenticate, async (req, res) => {
 
     sendDownloadedVideoFile(res, result);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    const code = error.statusCode || 500;
+    res.status(code).json({ success: false, error: error.message });
   }
 });
 
@@ -1698,28 +1809,39 @@ app.get('/api/download/tasks/:id/file', authenticate, async (req, res) => {
 // 下载管理 API 路由
 // ============================================================
 
+// GET /api/download/scope - 下载页筛选范围（管理员 / 组长 / 普通成员）
+app.get('/api/download/scope', authenticate, async (req, res) => {
+  try {
+    const data = await buildDownloadScopePayload(req.user);
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // GET /api/download/tasks - 获取下载任务列表
-app.get('/api/download/tasks', authenticate, (req, res) => {
+app.get('/api/download/tasks', authenticate, async (req, res) => {
   try {
     const { status = 'all', type = 'all', page = 1, pageSize = 20 } = req.query;
-    const isAdmin = req.user.role === 'admin';
+    const requested = parseOptionalUserId(req.query.user_id);
+    const userScope = await resolveDownloadTaskScope(req.user, requested);
     const result = videoDownloader.getDownloadTasks({
       status,
       type,
       page: parseInt(page),
       pageSize: parseInt(pageSize),
-      userId: req.user.id,
-      isAdmin,
+      userScope,
     });
     res.json({ success: true, data: result });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    const code = error.statusCode || 500;
+    res.status(code).json({ success: false, error: error.message });
   }
 });
 
 
 // POST /api/download/tasks/:id - 下载单个任务视频
-app.post('/api/download/tasks/:id', async (req, res) => {
+app.post('/api/download/tasks/:id', authenticate, async (req, res) => {
   try {
     const taskId = req.params.id;
     const db = getDatabase();
@@ -1735,6 +1857,8 @@ app.post('/api/download/tasks/:id', async (req, res) => {
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
+
+    await assertDownloadTaskAccessible(req, task.user_id);
 
     if (!task.video_url) {
       return res.status(400).json({ error: '视频仍在生成中，暂时无法下载' });
@@ -1757,23 +1881,32 @@ app.post('/api/download/tasks/:id', async (req, res) => {
       res.status(500).json({ error: result.error });
     }
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    const code = error.statusCode || 500;
+    res.status(code).json({ error: error.message });
   }
 });
 
 // POST /api/download/batch - 批量下载视频
-app.post('/api/download/batch', async (req, res) => {
+app.post('/api/download/batch', authenticate, async (req, res) => {
   try {
     const { taskIds } = req.body;
     if (!Array.isArray(taskIds) || taskIds.length === 0) {
       return res.status(400).json({ error: 'taskIds 必须是非空数组' });
     }
 
+    const db = getDatabase();
+    for (const tid of taskIds) {
+      const row = db.prepare('SELECT user_id FROM tasks WHERE id = ?').get(tid);
+      if (!row) {
+        return res.status(404).json({ error: `任务不存在: ${tid}` });
+      }
+      await assertDownloadTaskAccessible(req, row.user_id);
+    }
+
     const baseDownloadPath = videoDownloader.getDefaultDownloadPath();
     const results = await videoDownloader.batchDownloadVideos(taskIds, baseDownloadPath);
 
     // 更新下载状态
-    const db = getDatabase();
     for (const result of results) {
       if (result.success) {
         videoDownloader.updateDownloadStatus(result.taskId, 'done', { downloadPath: result.path });
@@ -1784,20 +1917,23 @@ app.post('/api/download/batch', async (req, res) => {
 
     res.json({ success: true, data: results });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    const code = error.statusCode || 500;
+    res.status(code).json({ error: error.message });
   }
 });
 
 // POST /api/download/tasks/:id/open - 打开视频所在文件夹
-app.post('/api/download/tasks/:id/open', async (req, res) => {
+app.post('/api/download/tasks/:id/open', authenticate, async (req, res) => {
   try {
     const taskId = req.params.id;
     const db = getDatabase();
 
-    const task = db.prepare('SELECT video_path FROM tasks WHERE id = ?').get(taskId);
+    const task = db.prepare('SELECT video_path, user_id FROM tasks WHERE id = ?').get(taskId);
     if (!task || !task.video_path) {
       return res.status(404).json({ error: '任务不存在或未下载' });
     }
+
+    await assertDownloadTaskAccessible(req, task.user_id);
 
     const result = await videoDownloader.openVideoFolder(task.video_path);
     if (result.success) {
@@ -1806,22 +1942,30 @@ app.post('/api/download/tasks/:id/open', async (req, res) => {
       res.status(500).json({ error: result.error });
     }
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    const code = error.statusCode || 500;
+    res.status(code).json({ error: error.message });
   }
 });
 
 // DELETE /api/download/tasks/:id - 删除任务
-app.delete('/api/download/tasks/:id', (req, res) => {
+app.delete('/api/download/tasks/:id', authenticate, async (req, res) => {
   try {
     const taskId = req.params.id;
     const db = getDatabase();
+
+    const row = db.prepare('SELECT user_id FROM tasks WHERE id = ?').get(taskId);
+    if (!row) {
+      return res.status(404).json({ error: '任务不存在' });
+    }
+    await assertDownloadTaskAccessible(req, row.user_id);
 
     // 删除任务（外键会自动删除 task_assets 和 generation_history）
     db.prepare('DELETE FROM tasks WHERE id = ?').run(taskId);
 
     res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    const code = error.statusCode || 500;
+    res.status(code).json({ error: error.message });
   }
 });
 
@@ -1829,13 +1973,11 @@ app.delete('/api/download/tasks/:id', (req, res) => {
 app.post('/api/download/refresh', authenticate, async (req, res) => {
   try {
     const db = getDatabase();
-    const userId = req.user.id;
-    const isAdmin = req.user.role === 'admin';
+    const requested = parseOptionalUserId(req.query.user_id);
+    const scope = await resolveDownloadTaskScope(req.user, requested);
+    const { clause: scopeClause, params: scopeParams } = scopeToTaskWhereClause(scope, 't');
 
     // 查找所有"生成中"或"已有 video_url 但未下载"的任务
-    const userFilter = isAdmin ? '' : 'AND t.user_id = ?';
-    const params = isAdmin ? [] : [userId];
-
     // 1. 找出已完成但未下载的任务（有 video_url，download_status 不是 done）
     const pendingTasks = db.prepare(`
       SELECT t.id, t.video_url, t.video_path, t.download_status
@@ -1843,8 +1985,8 @@ app.post('/api/download/refresh', authenticate, async (req, res) => {
       WHERE t.task_kind = 'output'
         AND t.video_url IS NOT NULL
         AND (t.download_status IS NULL OR t.download_status = 'pending')
-        ${userFilter}
-    `).all(...params);
+        ${scopeClause}
+    `).all(...scopeParams);
 
     // 自动下载已完成但未保存到本地的任务
     let refreshed = 0;
@@ -1871,9 +2013,9 @@ app.post('/api/download/refresh', authenticate, async (req, res) => {
       FROM tasks t
       WHERE t.task_kind = 'output'
         AND (t.status = 'generating' OR (t.history_id IS NOT NULL AND t.video_url IS NULL AND t.status != 'cancelled' AND t.status != 'error'))
-        ${userFilter}
+        ${scopeClause}
       ORDER BY t.created_at DESC
-    `).all(...params);
+    `).all(...scopeParams);
 
     res.json({
       success: true,
@@ -2043,8 +2185,8 @@ app.post('/api/auth/login', async (req, res) => {
     // ── 优先尝试 ModelToo 远程登录 ──
     const modeltooResult = await tryModelTooLogin(email, password);
     if (modeltooResult.success) {
-      // 远程验证通过 → 同步账号到本地（不存在则创建，已存在则更新密码）
-      syncModelTooUser(email, password);
+      // 远程验证通过 → 同步账号到本地（不存在则创建；展示名来自 ModelToo user）
+      syncModelTooUser(email, password, modeltooResult.remoteUser);
     }
     // 远程不可用或验证失败时，不阻塞，继续走本地登录
 
@@ -2230,14 +2372,99 @@ app.get('/api/admin/stats', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+// ============================================================
+// ModelToo 分组代理（MODELTOO_ADMIN_TOKEN 或 用户名密码自动登录）
+// ============================================================
+
+app.get('/api/admin/modeltoo/groups', authenticate, requireAdmin, async (req, res) => {
+  try {
+    if (!MODELTOO_API_URL) {
+      return res.status(503).json({
+        error: '未配置 MODELTOO_API_URL，请在 .env 中设置后重启服务',
+      });
+    }
+    const items = await fetchModelTooGroups(MODELTOO_API_URL);
+    res.json({ success: true, data: items });
+  } catch (error) {
+    console.error('[modeltoo] groups error:', error);
+    // 503：本机 SD 正常，但上游 ModelToo 不可用（与 Vite 连不上后端时的 502 区分）
+    res.status(503).json({
+      error: error.message || '拉取 ModelToo 分组失败',
+      code: 'MODELTOO_UPSTREAM',
+    });
+  }
+});
+
+// ============================================================
+// 视频生成统计接口（基于本地 tasks 表；可选 group_id 过滤）
+// ============================================================
+
+// GET /api/admin/stats/generation - 获取生成统计汇总 + 用户列表
+app.get('/api/admin/stats/generation', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const days = parseStatsDays(req.query);
+    let filterUserIds = null;
+    let groupMeta = null;
+    const groupId = String(req.query.group_id || '').trim();
+    if (groupId) {
+      const resolved = await resolveFilterUserIdsFromModelTooGroup(groupId);
+      filterUserIds = resolved.userIds;
+      groupMeta = {
+        groupId,
+        modelTooMemberCount: resolved.modelTooMemberCount,
+        matchedLocalUsers: resolved.userIds.length,
+      };
+    }
+
+    const summary = statsService.getGlobalGenerationSummary(days, filterUserIds);
+    const userStats = statsService.getUserGenerationStats(days, filterUserIds);
+
+    res.json({
+      success: true,
+      data: {
+        summary,
+        users: userStats,
+        groupFilter: groupMeta,
+      },
+    });
+  } catch (error) {
+    console.error('[stats] generation error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/stats/error-distribution - 获取失败原因分布（A 阶段）
+app.get('/api/admin/stats/error-distribution', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const days = parseStatsDays(req.query);
+    let filterUserIds = null;
+    const groupId = String(req.query.group_id || '').trim();
+    if (groupId) {
+      const resolved = await resolveFilterUserIdsFromModelTooGroup(groupId);
+      filterUserIds = resolved.userIds;
+    }
+
+    const distribution = statsService.getErrorDistribution(days, filterUserIds);
+    res.json({ success: true, data: distribution });
+  } catch (error) {
+    console.error('[stats] error-distribution error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // POST /api/admin/users - 管理员直接创建用户 (跳过邮箱验证码)
 app.post('/api/admin/users', authenticate, requireAdmin, async (req, res) => {
   try {
-    const { email, password, role, credits, status } = req.body || {};
+    const { email, password, role, credits, status, displayName, display_name } = req.body || {};
     if (!email || !password) {
       return res.status(400).json({ error: '邮箱和密码不能为空' });
     }
-    const user = authService.createUserByAdmin(email, password, { role, credits, status });
+    const user = authService.createUserByAdmin(email, password, {
+      role,
+      credits,
+      status,
+      displayName: displayName ?? display_name,
+    });
     res.json(user);
   } catch (error) {
     res.status(400).json({ error: error.message });
