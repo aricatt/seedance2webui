@@ -14,10 +14,13 @@ import {
 } from '../components/Icons';
 import type { User } from '../types';
 import { logout } from '../services/authService';
+import type { ModelTooProjectWithBalance } from '../services/modeltooBudgetService';
 
 interface SidebarProps {
   currentUser: User | null;
   onLogout: () => void;
+  selectedProject?: ModelTooProjectWithBalance | null;
+  onOpenProjectModal?: () => void;
 }
 
 interface MenuItem {
@@ -31,7 +34,7 @@ interface MenuItem {
   accent?: string;
 }
 
-export default function Sidebar({ currentUser, onLogout }: SidebarProps) {
+export default function Sidebar({ currentUser, onLogout, selectedProject, onOpenProjectModal }: SidebarProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const [expanded, setExpanded] = useState(true);
@@ -157,30 +160,63 @@ export default function Sidebar({ currentUser, onLogout }: SidebarProps) {
         {/* 底部用户信息 */}
         <div className="absolute bottom-0 left-0 right-0 p-3 border-t border-gray-800">
           {expanded ? (
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
-                  <UserIcon className="w-5 h-5 text-white" />
+            <div className="space-y-3">
+              {/* 项目信息 */}
+              {selectedProject && (
+                <button
+                  onClick={onOpenProjectModal}
+                  className="w-full flex items-center gap-2 px-2 py-2 bg-purple-500/10 border border-purple-500/30 rounded-lg hover:bg-purple-500/20 transition-all"
+                  title="点击切换项目"
+                >
+                  <div className="w-8 h-8 rounded bg-purple-500/20 flex items-center justify-center flex-shrink-0">
+                    <svg className="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                    </svg>
+                  </div>
+                  <div className="flex-1 min-w-0 text-left">
+                    <p className="text-xs text-gray-400 truncate">当前项目</p>
+                    <p className="text-sm font-medium text-white truncate">{selectedProject.project_name}</p>
+                    <p className="text-xs font-semibold text-emerald-400">{selectedProject.balance.toFixed(2)} 点</p>
+                  </div>
+                </button>
+              )}
+              {/* 用户信息 */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
+                    <UserIcon className="w-5 h-5 text-white" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-white truncate">
+                      {currentUser?.displayName?.trim() || currentUser?.email || '用户'}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {currentUser?.role === 'admin' ? '管理员' : '普通用户'}
+                    </p>
+                  </div>
                 </div>
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-white truncate">
-                    {currentUser?.displayName?.trim() || currentUser?.email || '用户'}
-                  </p>
-                  <p className="text-xs text-gray-500">
-                    {currentUser?.role === 'admin' ? '管理员' : '普通用户'}
-                  </p>
-                </div>
+                <button
+                  onClick={handleLogout}
+                  className="p-2 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all"
+                  title="退出登录"
+                >
+                  <LogoutIcon className="w-5 h-5" />
+                </button>
               </div>
-              <button
-                onClick={handleLogout}
-                className="p-2 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all"
-                title="退出登录"
-              >
-                <LogoutIcon className="w-5 h-5" />
-              </button>
             </div>
           ) : (
             <div className="flex flex-col items-center gap-2">
+              {selectedProject && onOpenProjectModal && (
+                <button
+                  onClick={onOpenProjectModal}
+                  className="p-2 text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 rounded-lg transition-all"
+                  title="切换项目"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                  </svg>
+                </button>
+              )}
               <button
                 onClick={handleLogout}
                 className="p-2 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all"

@@ -8,11 +8,22 @@ const EDITABLE_SETTING_KEYS = new Set([
   'model',
   'ratio',
   'duration',
+  'resolution',
   'download_path',
   'max_concurrent',
   'min_interval',
   'max_interval',
 ]);
+
+/** 仅管理员可改的平台开关 */
+const ADMIN_SETTING_KEYS = new Set([
+  'provider_ark_enabled',
+  'provider_luminia_enabled',
+]);
+
+export function isAdminSettingKey(key) {
+  return ADMIN_SETTING_KEYS.has(key);
+}
 
 function sanitizeSettingsRowMap(rows) {
   const settings = {};
@@ -52,8 +63,8 @@ export function getSetting(key) {
 /**
  * 更新设置
  */
-export function updateSetting(key, value) {
-  if (!EDITABLE_SETTING_KEYS.has(key)) {
+export function updateSetting(key, value, { allowAdminKeys = false } = {}) {
+  if (!EDITABLE_SETTING_KEYS.has(key) && !(allowAdminKeys && ADMIN_SETTING_KEYS.has(key))) {
     throw new Error('不支持更新该设置项');
   }
 
@@ -72,9 +83,13 @@ export function updateSetting(key, value) {
 /**
  * 批量更新设置
  */
-export function updateSettings(settings) {
+export function updateSettings(settings, { allowAdminKeys = false } = {}) {
   const db = getDatabase();
-  const entries = Object.entries(settings).filter(([key]) => EDITABLE_SETTING_KEYS.has(key));
+  const entries = Object.entries(settings).filter(([key]) => {
+    if (EDITABLE_SETTING_KEYS.has(key)) return true;
+    if (allowAdminKeys && ADMIN_SETTING_KEYS.has(key)) return true;
+    return false;
+  });
 
   const stmt = db.prepare(`
     INSERT INTO settings (key, value, updated_at)
@@ -99,4 +114,6 @@ export default {
   getSetting,
   updateSetting,
   updateSettings,
+  isAdminSettingKey,
 };
+

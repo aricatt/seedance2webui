@@ -138,7 +138,7 @@ export async function deleteTaskAsset(assetId: number): Promise<void> {
 /**
  * 生成任务视频
  */
-export async function generateTaskVideo(taskId: number): Promise<{
+export async function generateTaskVideo(taskId: number, projectId?: string): Promise<{
   success: boolean;
   taskId: number;
   batchId?: number;
@@ -148,7 +148,11 @@ export async function generateTaskVideo(taskId: number): Promise<{
 }> {
   const response = await fetch(`${API_BASE}/tasks/${taskId}/generate`, {
     method: 'POST',
-    headers: getAuthHeaders(),
+    headers: {
+      ...getAuthHeaders(),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ project_id: projectId }),
   });
   const result: ApiResponse<{
     success: boolean;

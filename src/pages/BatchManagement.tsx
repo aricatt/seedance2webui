@@ -719,6 +719,9 @@ export default function BatchManagementPage() {
               <span>默认创建 1 行草稿任务，可直接编辑提示词、图片、音频和视频数量。点击下方「+ 添加任务行」增加更多。</span>
               <span>每一行都可以单独点击“生成”异步提交，不会阻塞其他任务行。</span>
               <span>音频仅保存，生成记录可到下载管理继续查看和下载。</span>
+              <span className="text-blue-200/90 border-l border-blue-400/30 pl-3">
+                若同一行同时有参考图与参考视频/音频，方舟按「多模态参考」提交（非「仅首帧」模式）；与单任务页说明一致。
+              </span>
             </div>
           </div>
         )}

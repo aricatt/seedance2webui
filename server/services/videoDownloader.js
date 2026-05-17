@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { getDatabase } from '../database/index.js';
+import { resolvePlayableVideoUrl } from './legacyVideoUrlRefresh.js';
 
 /**
  * 视频下载服务
@@ -138,8 +139,10 @@ export async function downloadVideoByTaskId(taskId, baseDownloadPath) {
       return { success: false, error: '任务不存在' };
     }
 
-    if (!task.video_url) {
-      return { success: false, error: '任务没有视频 URL' };
+    const fetchUrl = await resolvePlayableVideoUrl(task);
+
+    if (!fetchUrl) {
+      return { success: false, error: '任务没有可用视频地址' };
     }
 
     // 构建保存路径：baseDownloadPath/project_name/
@@ -147,7 +150,7 @@ export async function downloadVideoByTaskId(taskId, baseDownloadPath) {
     const filename = buildTaskVideoFilename(task, taskId).replace(/\.mp4$/i, '');
 
     // 下载视频
-    const result = await downloadVideo(task.video_url, projectDir, filename);
+    const result = await downloadVideo(fetchUrl, projectDir, filename);
 
     if (result.success) {
       // 更新任务的 video_path
@@ -333,10 +336,15 @@ export function getDownloadTasks(options = {}) {
   const query = `
     SELECT
       t.id,
+      t.user_id,
       t.prompt,
       t.status,
       t.download_status,
       t.video_url,
+      t.persist_video_key,
+      t.persist_cover_key,
+      t.persist_video_tos_url,
+      t.persist_cover_tos_url,
       t.video_path,
       t.download_path,
       t.downloaded_at,
@@ -349,9 +357,16 @@ export function getDownloadTasks(options = {}) {
       t.created_at,
       t.completed_at,
       t.duration,
+      t.resolution,
       t.archive_path,
+      t.persist_archive_key,
+      t.persist_archive_tos_url,
       t.error_message,
       t.revised_prompt,
+      t.total_tokens,
+      t.completion_tokens,
+      t.cost,
+      t.unit_price,
       p.name as project_name,
       COALESCE(
         NULLIF(

@@ -4,6 +4,8 @@
  */
 export type AssetKind = 'image' | 'video' | 'audio';
 
+export type AssetSource = 'upload' | 'portrait';
+
 export interface AssetItem {
   kind: AssetKind;
   /** 稳定的资源 id，chip 里记录它，避免删图之后编号漂移 */
@@ -12,6 +14,10 @@ export interface AssetItem {
   label: string;
   /** 缩略图地址（图片/视频原 URL；音频可不传） */
   thumb?: string;
+  /** 来源：本地上传 vs 虚拟人像库 */
+  source?: AssetSource;
+  /** 角标文案，例如「库」 */
+  badge?: string;
 }
 
 export interface AssetMentionAttrs {

@@ -91,6 +91,11 @@ export default function AssetStrip({
                   </svg>
                 </div>
               )}
+              {a.badge && (
+                <span className="absolute top-0.5 right-0.5 text-[9px] font-semibold px-1 py-0.5 rounded bg-amber-500/90 text-black">
+                  {a.badge}
+                </span>
+              )}
               <span
                 className={`absolute bottom-0 left-0 right-0 text-[10px] text-center py-0.5 font-medium ${KIND_BADGE[a.kind]}`}
               >

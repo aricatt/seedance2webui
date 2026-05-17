@@ -2,20 +2,10 @@
  * 服务端任务归档（供 Studio / 小云雀 Bearer 集成路径）
  * 浏览器端仍用 archiveService.ts；集成请求无浏览器，在此生成等价 HTML 备案。
  */
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import sharp from 'sharp';
 import * as taskService from './taskService.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ARCHIVE_DIR = path.join(__dirname, '../../data/archives');
-
-function ensureArchiveDir() {
-  if (!fs.existsSync(ARCHIVE_DIR)) {
-    fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
-  }
-}
+import { saveTaskArchiveHtml } from './archivePersistService.js';
+import { getPortraitArchiveThumbBuffer } from './projectPortraitService.js';
 
 function escapeHtml(text) {
   return String(text ?? '')
@@ -45,22 +35,43 @@ export async function writeIntegrationGenerateVideoArchive(dbTaskId, opts) {
     duration,
     resolution,
     seed,
-    cameraFixed,
     watermark,
     generateAudio,
     creatorLabel,
+    portraitIds = [],
+    mtProjectId = '',
     imageFiles = [],
     videoFiles = [],
     audioFiles = [],
   } = opts;
 
-  ensureArchiveDir();
   const submittedAt = new Date().toISOString();
 
   const thumbBlocks = [];
+  let figIndex = 0;
+
+  if (mtProjectId && Array.isArray(portraitIds)) {
+    for (const pid of portraitIds) {
+      figIndex += 1;
+      const label = `图${figIndex}`;
+      try {
+        const buf = await getPortraitArchiveThumbBuffer({ id: Number(pid), mtProjectId });
+        const src = `data:image/jpeg;base64,${buf.toString('base64')}`;
+        thumbBlocks.push(
+          `<figure style="display:inline-block;margin:8px;vertical-align:top;text-align:center"><div style="font-size:12px;color:#666">${escapeHtml(label)} · 人像库</div><img alt="${escapeHtml(label)}" src="${src}" style="max-width:320px;border:1px solid #ccc;border-radius:4px"/><figcaption style="font-size:11px;color:#888;max-width:320px;word-break:break-all">人像库 #${escapeHtml(String(pid))}</figcaption></figure>`,
+        );
+      } catch (e) {
+        thumbBlocks.push(
+          `<p style="color:#b00">${escapeHtml(label)}（人像库 #${escapeHtml(String(pid))}）— 缩略图失败: ${escapeHtml(e.message || String(e))}</p>`,
+        );
+      }
+    }
+  }
+
   for (let i = 0; i < imageFiles.length; i++) {
     const f = imageFiles[i];
-    const label = `图${i + 1}`;
+    figIndex += 1;
+    const label = `图${figIndex}`;
     try {
       const buf = await sharp(f.buffer)
         .resize(320, 320, { fit: 'inside', withoutEnlargement: true })
@@ -102,11 +113,11 @@ ${creatorLabel ? ` · 操作账号 ${escapeHtml(creatorLabel)}` : ''}
 模型 ${escapeHtml(model)} · 比例 ${escapeHtml(String(ratio))} · 时长 ${escapeHtml(String(duration))}s
 ${resolution ? ` · 分辨率 ${escapeHtml(String(resolution))}` : ''}
  · seed ${seed !== undefined && seed !== null ? escapeHtml(String(seed)) : '随机'}
- · camera_fixed ${cameraFixed ? 'true' : 'false'} · watermark ${watermark ? 'true' : 'false'} · generate_audio ${generateAudio ? 'true' : 'false'}
+ · watermark ${watermark ? 'true' : 'false'} · generate_audio ${generateAudio ? 'true' : 'false'}
 </p>
 <h2>提示词</h2>
 <pre>${escapeHtml(prompt || '')}</pre>
-<h2>参考图片 (${imageFiles.length})</h2>
+<h2>参考图片 (${figIndex})</h2>
 ${thumbBlocks.length ? `<div>${thumbBlocks.join('\n')}</div>` : '<p>（无）</p>'}
 <h2>参考视频 (${videoFiles.length})</h2>
 ${videoFiles.length ? `<ul>${videoList}</ul>` : '<p>（无）</p>'}
@@ -117,8 +128,6 @@ ${audioFiles.length ? `<ul>${audioList}</ul>` : '<p>（无）</p>'}
 </body>
 </html>`;
 
-  const filePath = path.join(ARCHIVE_DIR, `${dbTaskId}.html`);
-  fs.writeFileSync(filePath, html, 'utf-8');
-  taskService.updateTask(dbTaskId, { archive_path: filePath });
-  console.log(`[archive] 集成任务 ${dbTaskId} 归档已保存 (${(html.length / 1024).toFixed(1)} KB) → ${filePath}`);
+  const saved = await saveTaskArchiveHtml(dbTaskId, html);
+  taskService.updateTask(dbTaskId, saved);
 }

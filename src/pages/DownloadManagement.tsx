@@ -6,6 +6,105 @@ import { useToast } from '../components/Toast';
 import { useApp } from '../context/AppContext';
 import { getAuthHeaders } from '../services/authService';
 import { formatDbTime, parseDbTimeMs } from '../utils/datetime';
+import { wrapExternalMediaForBrowser } from '../utils/tosImage';
+import { formatTokens, formatPrice } from '../utils/priceCalculator';
+
+/** 能否从远端拉取视频（方舟 URL 或已写入持久桶） */
+function taskHasArchive(
+  task: Pick<DownloadTask, 'archive_path' | 'persist_archive_key'>,
+): boolean {
+  return !!(
+    String(task.persist_archive_key || '').trim() ||
+    String(task.archive_path || '').trim()
+  );
+}
+
+function taskHasRemoteVideo(
+  task: Pick<DownloadTask, 'video_url' | 'persist_video_key' | 'persist_video_tos_url'>,
+): boolean {
+  return !!(
+    String(task.video_url || '').trim() ||
+    task.persist_video_key ||
+    String(task.persist_video_tos_url || '').trim().startsWith('http')
+  );
+}
+
+/**
+ * 详情 / 播放提示 / 预览脚注：只展示 TOS 持久化 canonical；
+ * 未落 TOS 的老任务才退回方舟 video_url（不展示预签名展示链）。
+ */
+function videoReferenceCanonicalOrLegacy(
+  task: Pick<DownloadTask, 'persist_video_tos_url' | 'video_url'>,
+): string {
+  const canon = String(task.persist_video_tos_url || '').trim();
+  if (canon.startsWith('http')) return canon;
+  return String(task.video_url || '').trim();
+}
+
+/** 封面 canonical URL（无签名，与库内 persist_cover_tos_url 一致） */
+function sdCoverCanonicalUrl(task: DownloadTask): string {
+  return String(task.persist_cover_tos_url || '').trim();
+}
+
+/** 列表缩略图：仅用同源 /api/tos/persist-image（勿把 TOS 预签名给 img 直连） */
+function sdCoverListImgSrc(task: DownloadTask): string | null {
+  const src = String(task.persist_cover_display_url || '').trim();
+  if (!src.startsWith('/api/tos/persist-image')) return null;
+  return src;
+}
+
+/** 旧任务无封面：视频首帧经 video-proxy，避免浏览器直连方舟/TOS */
+function sdCoverListVideoThumbSrc(task: DownloadTask): string | null {
+  const u = String(task.legacy_video_thumb_url || '').trim();
+  if (!u) return null;
+  return wrapExternalMediaForBrowser(u);
+}
+
+/** 列表封面悬停：只展示无签名对象地址（不展示预签名 img.src） */
+function sdCoverHoverTitle(task: DownloadTask): string {
+  const canon = sdCoverCanonicalUrl(task);
+  if (canon.startsWith('http')) return canon;
+  return '暂无封面对象地址（持久化未完成或未生成首帧）';
+}
+
+/** 打开归档悬停：TOS canonical / 本地路径 + 接口地址 */
+function archiveHoverHint(task: DownloadTask): string {
+  const lines: string[] = [];
+  const canon = String(task.persist_archive_tos_url || '').trim();
+  const key = String(task.persist_archive_key || '').trim();
+  const path = String(task.archive_path || '').trim();
+
+  if (canon.startsWith('http')) {
+    lines.push(canon);
+  } else if (key) {
+    lines.push(`TOS 对象 key：${key}`);
+  } else if (path.startsWith('http')) {
+    lines.push(path);
+  } else if (path) {
+    lines.push(`本地路径：${path}`);
+  } else {
+    lines.push('暂无归档地址');
+  }
+
+  lines.push(`打开方式：/api/tasks/${task.id}/archive（需登录）`);
+  return lines.join('\n');
+}
+
+/** 播放按钮悬停：仅 TOS canonical；无持久化时展示方舟 URL（老数据） */
+function playbackHoverHint(task: DownloadTask): string {
+  const lines: string[] = [];
+  const canon = String(task.persist_video_tos_url || '').trim();
+  const ark = String(task.video_url || '').trim();
+  if (canon.startsWith('http')) {
+    lines.push(canon);
+  } else if (ark.startsWith('http')) {
+    lines.push(`历史任务（未落 TOS）：${ark}`);
+  } else {
+    lines.push('暂无持久化对象地址（任务可能仍在处理）');
+  }
+  lines.push('实际播放使用本页临时链接');
+  return lines.join('\n');
+}
 
 interface DownloadState {
   tasks: DownloadTask[];
@@ -30,6 +129,8 @@ interface PreviewState {
   taskId: number;
   title: string;
   url: string;
+  /** 弹窗内展示的播放地址说明（含实际 video.src） */
+  footerLines?: string[];
 }
 
 interface DetailState {
@@ -308,7 +409,7 @@ export default function DownloadManagementPage() {
   // 下载全部待下载
   const handleDownloadAllPending = async () => {
     const pendingIds = tasks
-      .filter((t) => t.effective_download_status === 'pending' && !!t.video_url)
+      .filter((t) => t.effective_download_status === 'pending' && taskHasRemoteVideo(t))
       .map((t) => t.id);
     if (pendingIds.length === 0) {
       toast.info('没有待下载的任务');
@@ -330,7 +431,16 @@ export default function DownloadManagementPage() {
     try {
       const url = await downloadService.createStreamUrl(task.id);
       const title = task.video_path?.split('/').pop() || `任务 ${task.id}`;
-      setPreview({ taskId: task.id, title, url });
+      const footerLines: string[] = [];
+      const canon = String(task.persist_video_tos_url || '').trim();
+      const ark = String(task.video_url || '').trim();
+      if (canon.startsWith('http')) {
+        footerLines.push(`持久化对象地址：${canon}`);
+      } else if (ark.startsWith('http')) {
+        footerLines.push(`历史数据源（未落 TOS）：${ark}`);
+      }
+      footerLines.push('播放器使用本页临时 stream（支持 Range）；完整播放地址不在此列出');
+      setPreview({ taskId: task.id, title, url, footerLines });
     } catch (error) {
       toast.error(`预览失败：${error instanceof Error ? error.message : error}`);
     }
@@ -431,7 +541,7 @@ export default function DownloadManagementPage() {
   const totalPages = Math.ceil(total / pageSize);
 
   return (
-    <div className="p-6 max-w-7xl mx-auto bg-[#0f111a] min-h-screen">
+    <div className="p-6 w-full max-w-[min(1680px,calc(100vw-2rem))] mx-auto bg-[#0f111a] min-h-screen">
       {/* 标题 */}
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-white">下载管理</h1>
@@ -611,14 +721,14 @@ export default function DownloadManagementPage() {
         </div>
       </div>
 
-      {/* 任务列表表格 */}
-      <div className="bg-[#1c1f2e] rounded-lg border border-gray-800 overflow-hidden">
+      {/* 任务列表表格（宽屏拉满上面容器；窄屏横向滚动） */}
+      <div className="bg-[#1c1f2e] rounded-lg border border-gray-800 overflow-x-auto">
         {isLoading ? (
           <div className="p-8 text-center text-gray-400">加载中...</div>
         ) : tasks.length === 0 ? (
           <div className="p-8 text-center text-gray-400">暂无任务</div>
         ) : (
-          <table className="w-full">
+          <table className="w-full min-w-[1100px]">
             <thead className="bg-[#0f111a] border-b border-gray-800">
               <tr>
                 <th className="px-4 py-3 text-left">
@@ -629,15 +739,31 @@ export default function DownloadManagementPage() {
                     className="rounded border-gray-700 bg-[#1c1f2e] text-purple-600 focus:ring-purple-500 focus:ring-offset-0"
                   />
                 </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">任务 ID</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">项目</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">创建人</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">提示词</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase w-[52px]">封面</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase whitespace-nowrap w-[88px]">
+                  任务 ID
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase min-w-[120px]">
+                  项目
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase min-w-[90px]">
+                  创建人
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase min-w-[100px]">
+                  提示词
+                </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">类型</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">时长</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase whitespace-nowrap">
+                  分辨率
+                </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">状态</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">创建时间</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase">操作</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Tokens</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">费用</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase whitespace-nowrap min-w-[200px]">
+                  操作
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800">
@@ -652,17 +778,61 @@ export default function DownloadManagementPage() {
                       disabled={task.effective_download_status !== 'pending'}
                     />
                   </td>
+                  <td className="px-4 py-3 align-middle">
+                    {task.model_type === 'video' ? (
+                      (() => {
+                        const display = sdCoverListImgSrc(task);
+                        const videoThumb = sdCoverListVideoThumbSrc(task);
+                        if (videoThumb && !display) {
+                          return (
+                            <video
+                              src={videoThumb}
+                              muted
+                              playsInline
+                              preload="metadata"
+                              className="w-10 h-10 rounded object-cover bg-white/5 ring-1 ring-gray-800 shrink-0"
+                              title="历史任务：视频首帧预览"
+                            />
+                          );
+                        }
+                        return display ? (
+                          <img
+                            src={display}
+                            alt=""
+                            width={40}
+                            height={40}
+                            className="w-10 h-10 rounded object-cover bg-white/5 ring-1 ring-gray-800 shrink-0"
+                            loading="lazy"
+                            title={sdCoverHoverTitle(task)}
+                          />
+                        ) : (
+                          <div
+                            className="w-10 h-10 rounded bg-white/5 flex items-center justify-center text-[10px] text-gray-600 text-center leading-tight ring-1 ring-gray-800"
+                            title="暂无封面（持久化未完成或未生成首帧）"
+                          >
+                            —
+                          </div>
+                        );
+                      })()
+                    ) : (
+                      <span className="text-gray-600 text-xs">—</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-sm text-gray-300 font-mono">
                     {task.id.toString().padStart(6, '0')}
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-300">
-                    {task.project_name || '-'}
+                  <td className="px-4 py-3 text-sm text-gray-300 max-w-[220px]">
+                    <span className="block truncate" title={task.project_name || ''}>
+                      {task.project_name || '-'}
+                    </span>
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-400 truncate max-w-[140px]" title={task.user_email || ''}>
-                    {task.user_email || '-'}
+                  <td className="px-4 py-3 text-sm text-gray-400 max-w-[130px]" title={task.user_email || ''}>
+                    <span className="block truncate">{task.user_email || '-'}</span>
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-300 max-w-xs truncate" title={task.prompt}>
-                    {task.prompt.substring(0, 10)}{task.prompt.length > 10 ? '...' : ''}
+                    {task.prompt
+                      ? `${task.prompt.substring(0, 10)}${task.prompt.length > 10 ? '...' : ''}`
+                      : '—'}
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-300">
                     <span className={`px-2 py-0.5 rounded text-xs ${
@@ -673,6 +843,13 @@ export default function DownloadManagementPage() {
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-300">
                     {task.duration ? `${task.duration}s` : '-'}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-300 whitespace-nowrap" title={task.model_type === 'video' ? task.resolution || '未记录（可能为接口默认）' : ''}>
+                    {task.model_type === 'video'
+                      ? task.resolution?.trim()
+                        ? task.resolution.trim()
+                        : '—'
+                      : '—'}
                   </td>
                   <td className="px-4 py-3 text-sm">
                     <span className={`px-2 py-0.5 rounded text-xs border ${
@@ -695,6 +872,12 @@ export default function DownloadManagementPage() {
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-400">
                     {formatDbTime(task.created_at)}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-300">
+                    {task.total_tokens !== null && task.total_tokens !== undefined ? formatTokens(task.total_tokens) : '-'}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-300">
+                    {task.cost !== null && task.cost !== undefined ? formatPrice(task.cost) : '-'}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex justify-end gap-2">
@@ -739,7 +922,7 @@ export default function DownloadManagementPage() {
                           </svg>
                         </button>
                       )}
-                      {task.effective_download_status === 'pending' && !!task.video_url && (
+                      {task.effective_download_status === 'pending' && taskHasRemoteVideo(task) && (
                         <button
                           onClick={() => handleDownload(task.id)}
                           disabled={downloadingIds.has(task.id)}
@@ -758,12 +941,15 @@ export default function DownloadManagementPage() {
                           )}
                         </button>
                       )}
-                      {task.effective_download_status === 'done' && task.video_path && (
+                      {task.effective_download_status === 'done' &&
+                        (task.video_path ||
+                          task.persist_video_key ||
+                          String(task.persist_video_tos_url || '').trim().startsWith('http')) && (
                         <>
                           <button
                             onClick={() => handlePreview(task)}
                             className="p-1 text-purple-400 hover:bg-purple-500/10 rounded transition-colors"
-                            title="在线播放"
+                            title={playbackHoverHint(task)}
                           >
                             <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
                               <path d="M8 5v14l11-7z" />
@@ -800,12 +986,12 @@ export default function DownloadManagementPage() {
                         </>
                       )}
                       {/* 归档：任务提交时已生成的 HTML（含提示词 + 素材预览），离线可看 */}
-                      {task.archive_path && (
+                      {taskHasArchive(task) && (
                         <>
                           <button
                             onClick={() => handleOpenArchive(task.id)}
                             className="p-1 text-cyan-400 hover:bg-cyan-500/10 rounded transition-colors"
-                            title="查看归档（含提示词+素材预览）"
+                            title={archiveHoverHint(task)}
                           >
                             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -936,6 +1122,14 @@ export default function DownloadManagementPage() {
                   <DetailRow label="项目" value={detail.task.project_name || '-'} />
                   <DetailRow label="创建人" value={detail.task.user_email || '-'} />
                   <DetailRow label="时长" value={detail.task.duration ? `${detail.task.duration}s` : '-'} />
+                  <DetailRow
+                    label="分辨率"
+                    value={
+                      detail.task.model_type === 'video'
+                        ? detail.task.resolution?.trim() || '—（旧任务或未记录）'
+                        : '—'
+                    }
+                  />
                   <DetailRow label="提交时间" value={formatDbTime(detail.task.created_at)} />
                   {detail.task.completed_at && (
                     <DetailRow label="完成时间" value={formatDbTime(detail.task.completed_at)} />
@@ -943,18 +1137,34 @@ export default function DownloadManagementPage() {
                   {detail.task.history_id && (
                     <DetailRow label="History ID" value={detail.task.history_id} mono />
                   )}
-                  {detail.task.video_url && (
+                  {videoReferenceCanonicalOrLegacy(detail.task).startsWith('http') && (
                     <DetailRow
-                      label="视频 URL"
+                      label={
+                        String(detail.task.persist_video_tos_url || '').trim().startsWith('http')
+                          ? '视频对象地址（TOS）'
+                          : '视频 URL（历史，未落 TOS）'
+                      }
                       value={
-                        <a
-                          href={detail.task.video_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-purple-400 hover:text-purple-300 break-all"
+                        <span
+                          className="text-purple-200 break-all font-mono text-[11px]"
+                          title={
+                            String(detail.task.persist_video_tos_url || '').trim().startsWith('http')
+                              ? '持久桶对象路径；各系统通过 AK/SK 或 SD 服务端接口访问'
+                              : '早期任务仅保留方舟返回链接'
+                          }
                         >
-                          {detail.task.video_url}
-                        </a>
+                          {videoReferenceCanonicalOrLegacy(detail.task)}
+                        </span>
+                      }
+                    />
+                  )}
+                  {sdCoverCanonicalUrl(detail.task).startsWith('http') && (
+                    <DetailRow
+                      label="封面 canonical"
+                      value={
+                        <span className="text-cyan-300 break-all font-mono text-[11px]" title="对象路径；浏览器访问需经服务端授权">
+                          {sdCoverCanonicalUrl(detail.task)}
+                        </span>
                       }
                     />
                   )}
@@ -1028,6 +1238,16 @@ export default function DownloadManagementPage() {
                 className="w-full max-h-[80vh] mx-auto block"
               />
             </div>
+            {preview.footerLines && preview.footerLines.length > 0 && (
+              <div className="px-4 py-3 border-t border-gray-800 bg-[#151929] max-h-[min(40vh,280px)] overflow-y-auto">
+                <div className="text-[10px] font-medium text-gray-500 uppercase tracking-wide mb-2">
+                  参考地址（实际播放为临时链接）
+                </div>
+                <pre className="text-[11px] text-gray-400 whitespace-pre-wrap break-all font-mono leading-relaxed">
+                  {preview.footerLines.join('\n')}
+                </pre>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -12,7 +12,7 @@ interface RegisterFormData {
 }
 
 interface RegisterPageProps {
-  onRegisterSuccess: (user: User) => void;
+  onRegisterSuccess: (user: User) => void | Promise<void>;
 }
 
 export default function RegisterPage({ onRegisterSuccess }: RegisterPageProps) {
@@ -136,7 +136,7 @@ export default function RegisterPage({ onRegisterSuccess }: RegisterPageProps) {
         password: formData.password,
         emailCode: formData.verificationCode,
       });
-      onRegisterSuccess(result.user);
+      await onRegisterSuccess(result.user);
       navigate('/');
     } catch (err) {
       setError(err instanceof Error ? err.message : '注册失败');

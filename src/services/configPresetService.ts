@@ -53,8 +53,6 @@ export interface ConfigSnapshot {
   resolution?: string;
   /** 种子整数；未设置或 null 表示随机 */
   seed?: number | null;
-  /** 是否固定摄像头 */
-  cameraFixed?: boolean;
   /** 是否包含水印 */
   watermark?: boolean;
   /** 是否生成音频（有声视频） */
@@ -261,6 +259,7 @@ export async function getBlobByHash(hash: string): Promise<Blob | null> {
  * 基于快照重建一个 File 对象；本体已被 GC 或未缓存时返回 null
  */
 export async function reconstructFile(snap: AssetSnapshot): Promise<File | null> {
+  // 从 IndexedDB 恢复
   if (!snap.blobHash) return null;
   const blob = await getBlobByHash(snap.blobHash);
   if (!blob) return null;

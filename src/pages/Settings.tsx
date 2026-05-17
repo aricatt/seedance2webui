@@ -1,17 +1,27 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import * as settingsService from '../services/settingsService';
-import { RATIO_OPTIONS, DURATION_OPTIONS, MODEL_OPTIONS, RESOLUTION_OPTIONS } from '../types/index';
-import { SparkleIcon, CheckIcon } from '../components/Icons';
+import { fetchProviderStatus } from '../services/modelService';
+import { RATIO_OPTIONS, DURATION_OPTIONS, RESOLUTION_OPTIONS } from '../types/index';
+import { useVideoModels, getResolutionsForModel } from '../hooks/useVideoModels';
+import { SparkleIcon } from '../components/Icons';
 import { useToast } from '../components/Toast';
+
+function settingBool(value: string | undefined, fallback = true) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const s = String(value).toLowerCase();
+  return !(s === '0' || s === 'false' || s === 'no' || s === 'off');
+}
 
 export default function SettingsPage() {
   const { toast } = useToast();
-  const { state, updateSettingsAction } = useApp();
+  const { state, updateSettingsAction, currentUser } = useApp();
   const { settings } = state;
+  const { models: modelOptions, reload: reloadModels } = useVideoModels();
+  const isAdmin = currentUser?.role === 'admin';
 
   const [localSettings, setLocalSettings] = useState({
-    model: settings.model || 'doubao-seedance-2-0-260128',
+    model: settings.model || 'luminia-2.0',
     ratio: settings.ratio || '16:9',
     duration: settings.duration || '5',
     resolution: settings.resolution || '720p',
@@ -21,19 +31,62 @@ export default function SettingsPage() {
     max_interval: settings.max_interval || '50000',
   });
 
+  const [providerArkEnabled, setProviderArkEnabled] = useState(true);
+  const [providerLuminiaEnabled, setProviderLuminiaEnabled] = useState(true);
   const [arkKeyConfigured, setArkKeyConfigured] = useState<boolean | null>(null);
+  const [luminiaKeyConfigured, setLuminiaKeyConfigured] = useState<boolean | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
 
+  const resolutionChoices = useMemo(
+    () => getResolutionsForModel(localSettings.model, modelOptions),
+    [localSettings.model, modelOptions]
+  );
+
   useEffect(() => {
-    settingsService.getArkStatus()
-      .then((data) => setArkKeyConfigured(Boolean(data?.configured)))
-      .catch(() => setArkKeyConfigured(null));
-  }, []);
+    Promise.all([
+      settingsService.getArkStatus(),
+      settingsService.getLuminiaStatus(),
+      fetchProviderStatus().catch(() => null),
+    ])
+      .then(([ark, lum, prov]) => {
+        setArkKeyConfigured(Boolean(ark?.configured));
+        setLuminiaKeyConfigured(Boolean(lum?.configured));
+        if (prov) {
+          setProviderArkEnabled(prov.provider_ark_enabled);
+          setProviderLuminiaEnabled(prov.provider_luminia_enabled);
+        } else {
+          setProviderArkEnabled(settingBool(settings.provider_ark_enabled));
+          setProviderLuminiaEnabled(settingBool(settings.provider_luminia_enabled));
+        }
+      })
+      .catch(() => {
+        setArkKeyConfigured(null);
+        setLuminiaKeyConfigured(null);
+      });
+  }, [settings.provider_ark_enabled, settings.provider_luminia_enabled]);
+
+  useEffect(() => {
+    if (!modelOptions.some((m) => m.value === localSettings.model) && modelOptions[0]) {
+      setLocalSettings((prev) => ({ ...prev, model: modelOptions[0].value }));
+    }
+  }, [modelOptions, localSettings.model]);
+
+  useEffect(() => {
+    if (!resolutionChoices.includes(localSettings.resolution as typeof RESOLUTION_OPTIONS[number])) {
+      setLocalSettings((prev) => ({ ...prev, resolution: resolutionChoices[0] || '720p' }));
+    }
+  }, [resolutionChoices, localSettings.resolution]);
 
   const handleSave = async () => {
     try {
-      await updateSettingsAction(localSettings);
+      const payload: Record<string, string> = { ...localSettings };
+      if (isAdmin) {
+        payload.provider_ark_enabled = providerArkEnabled ? '1' : '0';
+        payload.provider_luminia_enabled = providerLuminiaEnabled ? '1' : '0';
+      }
+      await updateSettingsAction(payload);
       setHasChanges(false);
+      await reloadModels();
       toast.success('设置已保存');
     } catch (error) {
       toast.error(`保存失败：${error instanceof Error ? error.message : error}`);
@@ -49,9 +102,12 @@ export default function SettingsPage() {
       localSettings.download_path !== settings.download_path ||
       localSettings.max_concurrent !== settings.max_concurrent ||
       localSettings.min_interval !== settings.min_interval ||
-      localSettings.max_interval !== settings.max_interval;
+      localSettings.max_interval !== settings.max_interval ||
+      (isAdmin &&
+        (providerArkEnabled !== settingBool(settings.provider_ark_enabled) ||
+          providerLuminiaEnabled !== settingBool(settings.provider_luminia_enabled)));
     setHasChanges(changed);
-  }, [localSettings, settings]);
+  }, [localSettings, settings, isAdmin, providerArkEnabled, providerLuminiaEnabled]);
 
   return (
     <div className="h-screen overflow-y-auto bg-[#0f111a] text-white">
@@ -62,29 +118,55 @@ export default function SettingsPage() {
         <div className="bg-[#1c1f2e] rounded-xl p-6 mb-6 border border-gray-800">
           <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
             <SparkleIcon className="w-5 h-5 text-purple-400" />
-            方舟 API Key 状态
+            视频 API 平台
           </h2>
-          {arkKeyConfigured === null ? (
-            <div className="p-3 bg-[#0f111a] border border-gray-700 rounded-lg text-sm text-gray-400">
-              正在检测服务端 API Key 配置...
+          <div className="space-y-3">
+            <div className="flex items-center justify-between p-3 bg-[#0f111a] border border-gray-700 rounded-lg">
+              <div>
+                <div className="text-sm font-medium text-gray-200">Luminia（主用）</div>
+                <div className="text-xs text-gray-500 mt-0.5">
+                  Key: {luminiaKeyConfigured === null ? '检测中…' : luminiaKeyConfigured ? '已配置' : '未配置'}
+                </div>
+              </div>
+              {isAdmin && (
+                <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={providerLuminiaEnabled}
+                    disabled={!luminiaKeyConfigured}
+                    onChange={(e) => setProviderLuminiaEnabled(e.target.checked)}
+                    className="accent-purple-500"
+                  />
+                  启用
+                </label>
+              )}
             </div>
-          ) : arkKeyConfigured ? (
-            <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg flex items-center gap-2">
-              <CheckIcon className="w-4 h-4 text-green-400" />
-              <span className="text-sm text-green-400">
-                服务端已配置方舟 API Key，可以正常发起视频生成任务。
-              </span>
+            <div className="flex items-center justify-between p-3 bg-[#0f111a] border border-gray-700 rounded-lg">
+              <div>
+                <div className="text-sm font-medium text-gray-200">火山方舟（应急）</div>
+                <div className="text-xs text-gray-500 mt-0.5">
+                  Key: {arkKeyConfigured === null ? '检测中…' : arkKeyConfigured ? '已配置' : '未配置'}
+                </div>
+              </div>
+              {isAdmin && (
+                <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={providerArkEnabled}
+                    disabled={!arkKeyConfigured}
+                    onChange={(e) => setProviderArkEnabled(e.target.checked)}
+                    className="accent-purple-500"
+                  />
+                  启用
+                </label>
+              )}
             </div>
-          ) : (
-            <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
-              <span className="text-sm text-yellow-300">
-                服务端未配置方舟 API Key。请联系管理员在服务器的 <code>.env</code> 中设置 <code>ARK_API_KEY</code>。
-              </span>
-            </div>
+          </div>
+          {!isAdmin && (
+            <p className="mt-3 text-xs text-gray-500">
+              平台开关由管理员控制；API Key 在服务端 <code>.env</code> 中配置。
+            </p>
           )}
-          <p className="mt-3 text-xs text-gray-500">
-            API Key 统一由管理员在服务端配置，面向所有用户共享，普通用户无需也无法在前端录入。
-          </p>
         </div>
         {/* 模型设置 */}
         <div className="bg-[#1c1f2e] rounded-xl p-6 mb-6 border border-gray-800">
@@ -96,7 +178,7 @@ export default function SettingsPage() {
                 选择模型
               </label>
               <div className="space-y-2">
-                {MODEL_OPTIONS.map((option) => (
+                {modelOptions.map((option) => (
                   <button
                     key={option.value}
                     onClick={() =>
@@ -202,9 +284,8 @@ export default function SettingsPage() {
                 输出分辨率
               </label>
               <div className="flex flex-wrap gap-2">
-                {RESOLUTION_OPTIONS.map((r) => {
-                  const isFastModel = localSettings.model === 'doubao-seedance-2-0-fast-260128';
-                  const is1080pDisabled = isFastModel && r === '1080p';
+                {resolutionChoices.map((r) => {
+                  const is1080pDisabled = !resolutionChoices.includes('1080p') && r === '1080p';
                   return (
                     <button
                       key={r}
@@ -227,7 +308,7 @@ export default function SettingsPage() {
                 })}
               </div>
               <p className="text-xs text-gray-500 mt-2">
-                Seedance 2.0 支持 1080p，2.0 Fast 仅支持 480p/720p
+                当前统一仅支持 480p、720p（1080p 暂未开放）
               </p>
             </div>
           </div>
@@ -330,7 +411,7 @@ export default function SettingsPage() {
           <button
             onClick={() =>
               setLocalSettings({
-                model: settings.model || 'doubao-seedance-2-0-260128',
+                model: settings.model || 'luminia-2.0',
                 ratio: settings.ratio || '16:9',
                 duration: settings.duration || '5',
                 resolution: settings.resolution || '720p',

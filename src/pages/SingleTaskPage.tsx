@@ -8,7 +8,8 @@ import type {
   UploadedImage,
   GenerationState,
 } from '../types/index';
-import { RATIO_OPTIONS, DURATION_OPTIONS, MODEL_OPTIONS, RESOLUTION_OPTIONS } from '../types/index';
+import { RATIO_OPTIONS, DURATION_OPTIONS } from '../types/index';
+import { useVideoModels, getResolutionsForModel } from '../hooks/useVideoModels';
 import { generateVideo } from '../services/videoService';
 import { archiveTask } from '../services/archiveService';
 import VideoPlayer from '../components/VideoPlayer';
@@ -20,7 +21,6 @@ import {
   CloseIcon,
   SparkleIcon,
   HistoryIcon,
-  PackageIcon,
   CheckIcon,
   FilmIcon,
 } from '../components/Icons';
@@ -36,7 +36,6 @@ import {
 } from '../utils/arkFileLimits';
 import {
   fileToAssetSnapshot,
-  savePreset,
   pushHistory,
   saveDraft,
   loadDraft,
@@ -49,6 +48,9 @@ import {
   type ConfigSnapshot,
   type AssetSnapshot,
 } from '../services/configPresetService';
+import { estimatePriceRange, formatPrice } from '../utils/priceCalculator';
+import PortraitLibrary from '../components/PortraitLibrary';
+import type { ProjectPortrait } from '../services/portraitService';
 
 let nextId = 0;
 
@@ -67,8 +69,7 @@ interface AudioItem {
 }
 
 /**
- * 紧凑型 Toggle 芯片：整块按钮可点击切换，带视觉状态。
- * 适用于"有声视频 / 固定镜头 / 水印"这类布尔开关，节省纵向空间。
+ * 适用于「有声视频 / 水印」等布尔开关，节省纵向空间。
  */
 function ToggleChip({
   label,
@@ -148,7 +149,7 @@ function ResultPreview({
     : isGenerating
       ? progress || '正在生成视频...'
       : hasError
-        ? `✕ ${error || '生成失败'}`
+        ? `✗ ${error || '生成失败'}`
         : '生成结果将在此处预览';
   const statusColor = videoUrl
     ? 'text-green-300'
@@ -200,7 +201,7 @@ function ResultPreview({
         ) : isGenerating ? (
           <div className="flex flex-col items-center justify-center gap-3 px-6 text-center">
             <span className="w-12 h-12 border-[3px] border-purple-400 border-t-transparent rounded-full animate-spin" />
-            <span className="text-sm text-purple-200">正在生成中…</span>
+            <span className="text-sm text-purple-200">正在生成视频</span>
           </div>
         ) : hasError ? (
           <div className="flex flex-col items-center justify-center gap-2 text-center px-6">
@@ -217,7 +218,6 @@ function ResultPreview({
         )}
       </button>
 
-      {/* 状态 / 进度文字行（保留之前"生成过程描述"的体验） */}
       <button
         type="button"
         onClick={interactive ? onOpen : undefined}
@@ -237,10 +237,10 @@ function ResultPreview({
 }
 
 /**
- * 单个视频预览 tile：与参考图片一致的 80×80 方块。
- * - 用 muted/autoPlay/loop 做静音循环缩略，方便识别视频内容
+ * 单个视频预览 tile：与参考图片一致的 80×80 方块
+ * - muted/autoPlay/loop 做静音循略，方便识别视频内容
  * - 左下角小标签显示时长，hover 出现移除按钮
- * - 仍保留 onLoadedMetadata 回填原始宽高（用于后续接口与草稿恢复）
+ * - 仍保留 onLoadedMetadata 回填原始宽高（用于后口与草稿恢复横幅
  */
 function VideoTile({
   item,
@@ -286,22 +286,30 @@ function VideoTile({
   );
 }
 
-export default function SingleTaskPage() {
+interface SingleTaskPageProps {
+  onRefreshBalance?: () => Promise<void>;
+  /** 与 App 左下角所选 ModelToo 项目同步；勿仅用 localStorage 初值（登录后异步写入会滞后） */
+  selectedProject?: { project_id: string } | null;
+}
+
+export default function SingleTaskPage({ onRefreshBalance, selectedProject = null }: SingleTaskPageProps) {
+  const { models: modelOptions } = useVideoModels();
   const [images, setImages] = useState<UploadedImage[]>([]);
+  const [portraits, setPortraits] = useState<ProjectPortrait[]>([]);
+  const [selectedPortraitIds, setSelectedPortraitIds] = useState<number[]>([]);
   const [videoItems, setVideoItems] = useState<VideoItem[]>([]);
   const [audioItems, setAudioItems] = useState<AudioItem[]>([]);
   const [prompt, setPrompt] = useState('');
-  const [model, setModel] = useState<ModelId>(MODEL_OPTIONS[0].value);
+  const [model, setModel] = useState<ModelId>('luminia-2.0');
   const [ratio, setRatio] = useState<AspectRatio>('9:16');
   const [duration, setDuration] = useState<Duration>(5);
   // 新暴露的 Seedance 2.0 原生参数
   const [resolution, setResolution] = useState<Resolution>('720p');
-  /** 种子值；'' 表示随机（模型自动） */
+  /** 种子值；'' 表示随机（模型自动 */
   const [seedInput, setSeedInput] = useState<string>('');
-  const [cameraFixed, setCameraFixed] = useState<boolean>(false);
   const [watermark, setWatermark] = useState<boolean>(false);
   const [generateAudio, setGenerateAudio] = useState<boolean>(true);
-  /** 视频预览弹窗是否打开；生成成功/失败时会自动打开 */
+  /** 视频预览弹窗打开；生成成功/失败时会打开 */
   const [playerOpen, setPlayerOpen] = useState<boolean>(false);
   const [generation, setGeneration] = useState<GenerationState>({
     status: 'idle',
@@ -312,7 +320,37 @@ export default function SingleTaskPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
+  const resolutionChoices = useMemo(
+    () => getResolutionsForModel(model, modelOptions),
+    [model, modelOptions]
+  );
+
+  useEffect(() => {
+    if (modelOptions.length > 0 && !modelOptions.some((m) => m.value === model)) {
+      setModel(modelOptions[0].value);
+    }
+  }, [modelOptions, model]);
+
+  useEffect(() => {
+    if (!resolutionChoices.includes(resolution)) {
+      setResolution((resolutionChoices[0] || '720p') as Resolution);
+    }
+  }, [resolutionChoices, resolution]);
+
   const maxImages = ARK_LIMITS.image.countMax;
+
+  const mtProjectId = useMemo(() => {
+    const id = selectedProject?.project_id;
+    return id != null && String(id).trim() !== '' ? String(id) : null;
+  }, [selectedProject?.project_id]);
+
+  const isLuminiaModel = useMemo(() => {
+    const def = modelOptions.find((m) => m.value === model);
+    if (def?.provider === 'luminia') return true;
+    return model.toLowerCase().startsWith('luminia');
+  }, [model, modelOptions]);
+
+  const portraitOffset = selectedPortraitIds.length;
   const maxVideos = ARK_LIMITS.video.countMax;
   const maxAudios = ARK_LIMITS.audio.countMax;
   const navigate = useNavigate();
@@ -326,28 +364,41 @@ export default function SingleTaskPage() {
   const promptEditorRef = useRef<PromptEditorHandle>(null);
 
   // 配置预设相关
-  const { toast, prompt: showPrompt } = useToast();
+  const { toast } = useToast();
   const [showPresetPanel, setShowPresetPanel] = useState(false);
   const [presetReloadToken, setPresetReloadToken] = useState(0);
-  /** 从预设/历史加载后待补全的素材清单（按原 kind 分组，按 label 顺序） */
+  /** 从预设/历史加载后待补全的素材清单（按原 kind 分组，按 label 顺序）*/
   const [pending, setPending] = useState<{
     images: AssetSnapshot[];
     videos: AssetSnapshot[];
     audios: AssetSnapshot[];
   } | null>(null);
-  /** 未提交的 draft 快照：挂载时询问是否恢复 */
+  /** 未提交的 draft 快照：挂载时询问恢复 */
   const [draftToRestore, setDraftToRestore] = useState<ConfigSnapshot | null>(null);
   const [draftRestoreTs, setDraftRestoreTs] = useState<number | null>(null);
 
   // 弹窗顶部素材条 & 编辑器需要的统一 AssetItem 列表
   const modalAssets = useMemo<AssetItem[]>(() => {
     const items: AssetItem[] = [];
+    selectedPortraitIds.forEach((id, i) => {
+      const p = portraits.find((x) => x.id === id);
+      if (!p) return;
+      items.push({
+        kind: 'image',
+        id: `portrait-${id}`,
+        label: `图${i + 1}`,
+        thumb: p.previewUrl,
+        source: 'portrait',
+        badge: '库',
+      });
+    });
     images.forEach((img) => {
       items.push({
         kind: 'image',
         id: img.id,
         label: `图${img.index}`,
         thumb: img.previewUrl,
+        source: 'upload',
       });
     });
     videoItems.forEach((v, i) => {
@@ -366,10 +417,16 @@ export default function SingleTaskPage() {
       });
     });
     return items;
-  }, [images, videoItems, audioItems]);
+  }, [selectedPortraitIds, portraits, images, videoItems, audioItems]);
+
+  useEffect(() => {
+    setImages((prev) =>
+      prev.map((img, i) => ({ ...img, index: portraitOffset + i + 1 })),
+    );
+  }, [portraitOffset]);
 
   // ==========================================================
-  // Pending 匹配：看哪些期望素材已经被用户重新选择补齐
+  // Pending 匹配：看期望素材已经户重新择补齐
   // ==========================================================
   const pendingMatches = useMemo(() => {
     if (!pending) return null;
@@ -392,7 +449,7 @@ export default function SingleTaskPage() {
   }, [pending, images, videoItems, audioItems]);
 
   // ==========================================================
-  // 当前配置 → ConfigSnapshot（异步，需要生成缩略图）
+  // 当前配置 → ConfigSnapshot（异步，要生成缩略图
   // ==========================================================
   const buildCurrentSnapshot = useCallback(async (): Promise<ConfigSnapshot> => {
     const imageSnaps = await Promise.all(
@@ -426,7 +483,6 @@ export default function SingleTaskPage() {
       duration,
       resolution,
       seed: Number.isFinite(seedNum as number) ? (seedNum as number) : null,
-      cameraFixed,
       watermark,
       generateAudio,
       images: imageSnaps,
@@ -440,7 +496,6 @@ export default function SingleTaskPage() {
     duration,
     resolution,
     seedInput,
-    cameraFixed,
     watermark,
     generateAudio,
     images,
@@ -449,8 +504,8 @@ export default function SingleTaskPage() {
   ]);
 
   // ==========================================================
-  // 加载一个快照回填到 UI：清空现有素材 + 恢复参数 + 从 Blob 仓库重建文件
-  // 未能重建的素材（哈希缺失或已 GC）进入 pending 提示区
+  // 加载照回 UI：清空现有素材 + 恢复参数 + Blob 仓库重建文件
+  // 未能重建的素材（哈希缺失或已 GC）进入 pending 提示条
   // ==========================================================
   const applySnapshot = useCallback(
     async (snap: ConfigSnapshot) => {
@@ -476,7 +531,6 @@ export default function SingleTaskPage() {
       } else {
         setSeedInput('');
       }
-      if (typeof snap.cameraFixed === 'boolean') setCameraFixed(snap.cameraFixed);
       if (typeof snap.watermark === 'boolean') setWatermark(snap.watermark);
       if (typeof snap.generateAudio === 'boolean') setGenerateAudio(snap.generateAudio);
 
@@ -557,7 +611,7 @@ export default function SingleTaskPage() {
   );
 
   // ==========================================================
-  // 挂载时：初始化存储（持久化申请 + GC）并尝试恢复未提交的 draft
+  // 挂载时：初始化存储（持久化申请持久化申请 + GC）并尝试恢复交的 draft
   // ==========================================================
   useEffect(() => {
     let cancelled = false;
@@ -580,13 +634,13 @@ export default function SingleTaskPage() {
     return () => {
       cancelled = true;
     };
-    // 只在首次挂载运行
+    // 仅首次挂载运行
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ==========================================================
-  // 自动保存 draft：变更后 3 秒无操作就把完整快照（含哈希引用）写入
-  // 因为素材添加时已 prewarmBlob 预热，哈希基本已就绪，buildCurrentSnapshot 很快
+  // 防抖保存 draft：变更后 3 秒无操作就把完整配置（含哈希引用）写入
+  // 因为素材添加时已 prewarmBlob 预热，哈希基就绪，buildCurrentSnapshot 很快
   // ==========================================================
   useEffect(() => {
     const hasAnything =
@@ -595,7 +649,7 @@ export default function SingleTaskPage() {
       videoItems.length > 0 ||
       audioItems.length > 0;
     if (!hasAnything) {
-      // 清空状态就丢掉 draft
+      // 清空状态后就丢掉 draft
       void clearDraft();
       return;
     }
@@ -605,7 +659,7 @@ export default function SingleTaskPage() {
           const snap = await buildCurrentSnapshot();
           await saveDraft(snap);
         } catch (e) {
-          console.warn('[preset] 自动保存 draft 失败', e);
+          console.warn('[preset] 防抖保存 draft 失败', e);
         }
       })();
     }, 3000);
@@ -613,38 +667,6 @@ export default function SingleTaskPage() {
   }, [prompt, model, ratio, duration, images, videoItems, audioItems, buildCurrentSnapshot]);
 
   // ==========================================================
-  // 手动保存为预设
-  // ==========================================================
-  const handleSavePreset = useCallback(async () => {
-    const hasAnything =
-      prompt.trim() ||
-      images.length > 0 ||
-      videoItems.length > 0 ||
-      audioItems.length > 0;
-    if (!hasAnything) {
-      toast.warning('当前配置为空，无需保存');
-      return;
-    }
-    const defaultName = `预设 ${new Date().toLocaleString('zh-CN', { hour12: false })}`;
-    const name = await showPrompt({
-      title: '保存为预设',
-      message: '为当前配置命名，之后可随时加载复用。',
-      defaultValue: defaultName,
-      placeholder: '例如：产品广告 · 3D 风格',
-      confirmText: '保存',
-    });
-    if (name === null) return;
-    try {
-      const snap = await buildCurrentSnapshot();
-      await savePreset(name, snap);
-      setPresetReloadToken((n) => n + 1);
-      toast.success('已保存为预设');
-    } catch (e) {
-      console.error('[preset] 保存预设失败', e);
-      toast.error('保存失败：' + (e instanceof Error ? e.message : '未知错误'));
-    }
-  }, [prompt, images, videoItems, audioItems, buildCurrentSnapshot, toast, showPrompt]);
-
   const dismissPending = useCallback(() => setPending(null), []);
   const dismissDraftRestore = useCallback(() => {
     setDraftToRestore(null);
@@ -656,7 +678,6 @@ export default function SingleTaskPage() {
     void applySnapshot(draftToRestore).then(() => {
       setDraftToRestore(null);
       setDraftRestoreTs(null);
-      void clearDraft();
       toast.success('已恢复上次未提交的配置');
     });
   }, [draftToRestore, applySnapshot, toast]);
@@ -671,12 +692,18 @@ export default function SingleTaskPage() {
       setUploadWarning('');
       const incoming = Array.from(fileList);
 
-      const countErr = validateImageCount(images.length, incoming.length);
+      const countErr = validateImageCount(
+        images.length + portraitOffset,
+        incoming.length,
+      );
       if (countErr) {
         setUploadError(countErr);
       }
 
-      const allowed = incoming.slice(0, Math.max(0, maxImages - images.length));
+      const allowed = incoming.slice(
+        0,
+        Math.max(0, maxImages - images.length - portraitOffset),
+      );
       const accepted: UploadedImage[] = [];
       const errors: string[] = [];
       const warnings: string[] = [];
@@ -691,7 +718,7 @@ export default function SingleTaskPage() {
           id: `img-${++nextId}`,
           file,
           previewUrl: URL.createObjectURL(file),
-          index: images.length + accepted.length + 1,
+          index: portraitOffset + images.length + accepted.length + 1,
         });
         prewarmBlob(file);
       }
@@ -706,7 +733,7 @@ export default function SingleTaskPage() {
         setImages([...images, ...accepted]);
       }
     },
-    [images, maxImages]
+    [images, maxImages, portraitOffset]
   );
 
   const removeImage = useCallback(
@@ -716,10 +743,10 @@ export default function SingleTaskPage() {
 
       const updated = images
         .filter((img) => img.id !== id)
-        .map((img, i) => ({ ...img, index: i + 1 }));
+        .map((img, i) => ({ ...img, index: portraitOffset + i + 1 }));
       setImages(updated);
     },
-    [images]
+    [images, portraitOffset]
   );
 
   const clearAllImages = useCallback(() => {
@@ -728,7 +755,7 @@ export default function SingleTaskPage() {
   }, [images]);
 
   // ==========================================================
-  // 视频: 多段, 每段独立校验 + 聚合总时长校验
+  // 视频: 多段, 每校验 + 聚合总时长校验
   // ==========================================================
   const addVideos = useCallback(
     async (fileList: FileList | null) => {
@@ -788,7 +815,7 @@ export default function SingleTaskPage() {
   );
 
   // ==========================================================
-  // 音频: 多段, 每段独立校验 + 聚合总时长校验
+  // 音频: 多段, 每校验 + 聚合总时长校验
   // ==========================================================
   const addAudios = useCallback(
     async (fileList: FileList | null) => {
@@ -845,6 +872,7 @@ export default function SingleTaskPage() {
     if (
       !prompt.trim() &&
       images.length === 0 &&
+      selectedPortraitIds.length === 0 &&
       videoItems.length === 0 &&
       audioItems.length === 0
     )
@@ -856,7 +884,26 @@ export default function SingleTaskPage() {
       progress: '正在提交视频生成请求...',
     });
 
-    // 捕获归档所需的素材快照（稍后用户可能清空状态）
+    // 捕获归档所需的素材快照（稍后用户清空状态）
+    const savedProject = localStorage.getItem('modeltoo_selected_project');
+    const archiveMtProjectId = savedProject ? (JSON.parse(savedProject).project_id as string) : '';
+
+    const archivePortraits = selectedPortraitIds.flatMap((id, i) => {
+      const p = portraits.find((x) => x.id === id);
+      if (!p || !archiveMtProjectId) return [];
+      const assetRef = p.luminiaAssetId ? `asset://${p.luminiaAssetId}` : '';
+      return [
+        {
+          portraitId: id,
+          mtProjectId: archiveMtProjectId,
+          label: `图${i + 1}`,
+          originalName: p.name
+            ? `${p.name}${assetRef ? ` · ${assetRef}` : ''}`
+            : `人像库 #${id}${assetRef ? ` · ${assetRef}` : ''}`,
+        },
+      ];
+    });
+
     const archiveImages = images.map((img) => ({
       file: img.file,
       label: `图${img.index}`,
@@ -876,6 +923,19 @@ export default function SingleTaskPage() {
 
     try {
       const seedNum = seedInput.trim() === '' ? undefined : Number(seedInput);
+      
+      const selectedProject = savedProject ? JSON.parse(savedProject) : null;
+      const projectId = selectedProject?.project_id;
+      
+      if (!projectId) {
+        setGeneration({
+          status: 'error',
+          error: '未加入项目/积分不足。请先在左下角选择 ModelToo 项目。',
+          progress: '',
+        });
+        return;
+      }
+      
       const result = await generateVideo(
         {
           prompt,
@@ -884,23 +944,24 @@ export default function SingleTaskPage() {
           duration,
           resolution,
           seed: Number.isFinite(seedNum as number) ? (seedNum as number) : undefined,
-          cameraFixed,
           watermark,
           generateAudio,
           files: images.map((img) => img.file),
           videoFiles: videoItems.map((v) => v.file),
           audioFiles: audioItems.map((a) => a.file),
+          portraitIds:
+            selectedPortraitIds.length > 0 ? selectedPortraitIds : undefined,
         },
         (progress) => {
           setGeneration((prev) => ({ ...prev, progress }));
         },
         // 任务提交成功后立即触发客户端归档（fire-and-forget，失败不影响主流程）
-        // 注意：服务端若创建 DB 任务失败，dbTaskId 可能为 null，但生成仍会进行；
-        // 「最近历史」仅依赖提交成功，必须与 dbTaskId / 归档解耦，否则会全队不写历史。
+        // 注意：服务端若创建 DB 任务失败，dbTaskId null，但生成仍会进行；
         ({ dbTaskId }) => {
           if (dbTaskId) {
             void archiveTask({
               prompt,
+              portraits: archivePortraits,
               images: archiveImages,
               videos: archiveVideos,
               audios: archiveAudios,
@@ -910,10 +971,11 @@ export default function SingleTaskPage() {
                 model,
                 ratio,
                 duration,
+                resolution,
               },
             });
           }
-          // 提交成功 → 把当前配置写入"最近历史"，并清掉 draft
+          // 提交成功 把当前配置近历史，并清掉 draft
           void (async () => {
             try {
               const snap = await buildCurrentSnapshot();
@@ -921,16 +983,19 @@ export default function SingleTaskPage() {
                 await pushHistory(snap);
                 setPresetReloadToken((n) => n + 1);
               }
-              await clearDraft();
             } catch (e) {
-              console.warn('[preset] 写入历史失败（不影响主流程）', e);
+              console.error('保存历史失败:', e);
             }
           })();
         },
+        projectId,
+        priceEstimate?.maxPrice, // 使用预估费用的最大（余额充足
       );
 
       if (result.data && result.data.length > 0 && result.data[0].url) {
         setGeneration({ status: 'success', result });
+        // 刷新余额
+        void onRefreshBalance?.();
       } else {
         setGeneration({
           status: 'error',
@@ -946,6 +1011,7 @@ export default function SingleTaskPage() {
   }, [
     prompt,
     images,
+    selectedPortraitIds,
     videoItems,
     audioItems,
     model,
@@ -953,11 +1019,11 @@ export default function SingleTaskPage() {
     duration,
     resolution,
     seedInput,
-    cameraFixed,
     watermark,
     generateAudio,
     generation.status,
     buildCurrentSnapshot,
+    onRefreshBalance,
   ]);
 
   const handleReset = () => {
@@ -968,7 +1034,8 @@ export default function SingleTaskPage() {
     setUploadWarning('');
     setGeneration({ status: 'idle' });
     setPending(null);
-    // 仅重置核心输入；不强制复位模型/比例/分辨率/时长/开关（用户预期保留偏好）
+    setSelectedPortraitIds([]);
+    // 仅重心输入；不强制复位模型/比例/分辨率/时长/开关（用户预期保留偏好）
     setSeedInput('');
   };
 
@@ -1003,15 +1070,32 @@ export default function SingleTaskPage() {
   const canGenerate =
     (prompt.trim() ||
       images.length > 0 ||
+      selectedPortraitIds.length > 0 ||
       videoItems.length > 0 ||
       audioItems.length > 0) &&
     !isGenerating;
+
+  // 计算费用估算
+  const priceEstimate = useMemo(() => {
+    const hasVideoInput = videoItems.length > 0;
+    const inputVideoDuration = hasVideoInput ? videoItems.reduce((sum, v) => sum + v.duration, 0) : 0;
+    
+    return estimatePriceRange({
+      model,
+      resolution,
+      duration,
+      hasVideoInput,
+      inputVideoDuration,
+    });
+  }, [model, resolution, duration, videoItems]);
+
+  const hasRefVideoOrAudio = videoItems.length > 0 || audioItems.length > 0;
 
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-[#0f111a] text-white">
       {/* Mobile Header */}
       <div className="md:hidden sticky top-0 z-40 bg-[#0f111a]/95 backdrop-blur-sm px-4 py-3 flex items-center justify-between border-b border-gray-800">
-        <h1 className="text-lg font-bold">{MODEL_OPTIONS.find(m => m.value === model)?.label || 'Seedance 2.0'}</h1>
+        <h1 className="text-lg font-bold">{modelOptions.find(m => m.value === model)?.label || 'Seedance 2.0'}</h1>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setPlayerOpen(true)}
@@ -1038,13 +1122,13 @@ export default function SingleTaskPage() {
         </div>
       </div>
 
-      {/* 主面板 — 配置（右侧 VideoPlayer 已改为弹窗，此处占满整屏） */}
+      {/* 主面板 + 配置（右VideoPlayer 已改为弹窗，此栏占满整屏）*/}
       <div className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 bg-[#0f111a]">
         {/* 内容最大宽度约束，避免在超宽屏上行太长 */}
         <div className="mx-auto w-full max-w-[1400px]">
-        {/* Desktop Header：仅标题 + 齿轮（视频预览已搬至右列大块区域） */}
+        {/* Desktop Header：仅标题 + 齿轮（频览已右列大块区域*/}
         <div className="hidden md:flex items-center justify-between gap-4 mb-4">
-          <h2 className="text-xl font-bold">{MODEL_OPTIONS.find(m => m.value === model)?.label || 'Seedance 2.0'} 视频配置</h2>
+          <h2 className="text-xl font-bold">{modelOptions.find(m => m.value === model)?.label || 'Seedance 2.0'} 视频配置</h2>
           <button
             onClick={() => navigate('/settings')}
             className="p-2 rounded-lg hover:bg-gray-800 transition-colors"
@@ -1060,7 +1144,7 @@ export default function SingleTaskPage() {
           <div className="mb-4 bg-indigo-900/30 border border-indigo-700/60 rounded-xl px-3 py-2.5 flex items-start gap-3">
             <div className="flex-1 min-w-0">
               <div className="text-xs font-medium text-indigo-200">
-                发现上次未提交的配置
+                发现上交的配置
                 {draftRestoreTs && (
                   <span className="text-gray-400 font-normal ml-1">
                     · {new Date(draftRestoreTs).toLocaleString('zh-CN', { hour12: false })}
@@ -1068,7 +1152,7 @@ export default function SingleTaskPage() {
                 )}
               </div>
               <div className="text-[11px] text-gray-400 mt-0.5 truncate">
-                恢复后会覆盖当前所有参数与素材条目（素材本体仍需重新选择）
+                恢复后会覆盖当前已有参数与素材条目（素材本体仍需重新选择）
               </div>
             </div>
             <div className="flex items-center gap-1 flex-shrink-0">
@@ -1089,16 +1173,16 @@ export default function SingleTaskPage() {
           </div>
         )}
 
-        {/* 待补全素材横幅 */}
+        {/* 待补全素材横幅*/}
         {pending && pendingMatches && pendingMatches.totalExpected > 0 && (
           <div className="mb-4 bg-amber-900/20 border border-amber-700/50 rounded-xl px-3 py-3">
             <div className="flex items-start justify-between gap-3 mb-2">
               <div className="min-w-0">
                 <div className="text-xs font-medium text-amber-200">
-                  配置已恢复 · 待补全素材 {pendingMatches.totalHit}/{pendingMatches.totalExpected}
+                  配置已恢复· 待补全素材{pendingMatches.totalHit}/{pendingMatches.totalExpected}
                 </div>
                 <div className="text-[11px] text-gray-400 mt-0.5">
-                  浏览器安全限制无法自动读取本地文件；请按相同顺序重新选择以下素材，系统会按文件名+大小自动识别并标记已补全
+                  浏器安全限制无法自动读取本地文件；请按相同顺序重新选择以下素材，系统会按文件名+大小识别并标记已补全
                 </div>
               </div>
               <button
@@ -1130,7 +1214,7 @@ export default function SingleTaskPage() {
                       <div className="w-6 h-6 bg-gray-800 rounded-sm" />
                     )}
                     <span className="text-[11px] text-purple-300 font-medium">
-                      {snap.label || `图${i + 1}`}
+                      {snap.label || `{i + 1}`}
                     </span>
                     <span className="text-[11px] text-gray-400 max-w-[120px] truncate">
                       {snap.name}
@@ -1196,7 +1280,6 @@ export default function SingleTaskPage() {
             </div>
             {pendingMatches.totalHit === pendingMatches.totalExpected && (
               <div className="mt-2 text-[11px] text-green-400 flex items-center gap-1">
-                <CheckIcon className="w-3 h-3" />
                 全部素材已补全
               </div>
             )}
@@ -1204,34 +1287,51 @@ export default function SingleTaskPage() {
         )}
 
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(380px,520px)] lg:gap-6 items-start">
-          {/* 左列：全部输入 + 参数配置（提示词下方即 Settings） */}
+          {/* 左列：全部输入 + 参数配置（提示词下方即 Settings）*/}
           <div className="space-y-5 min-w-0">
           {/* 配置管理按钮（紧凑：放在左列顶端，而不是横跨整条顶栏） */}
           <div className="flex items-center gap-2 -mb-1">
             <button
               onClick={() => setShowPresetPanel(true)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-[#1c1f2e] hover:bg-[#25293d] border border-gray-800 hover:border-purple-500/40 rounded-md text-xs text-gray-300 transition-all"
               title="查看保存的预设和最近提交历史"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-[#1c1f2e] hover:bg-[#25293d] border border-gray-800 hover:border-purple-500/40 rounded-md text-xs text-gray-300 transition-all"
             >
               <HistoryIcon className="w-3.5 h-3.5 text-purple-400" />
               加载配置
             </button>
-            <button
+            {/* 隐藏保存预设按钮 - 使用历史记录代替 */}
+            {/* <button
               onClick={handleSavePreset}
               disabled={isGenerating}
               className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-[#1c1f2e] hover:bg-[#25293d] border border-gray-800 hover:border-purple-500/40 rounded-md text-xs text-gray-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              title="把当前配置保存为可复用的预设"
             >
               <PackageIcon className="w-3.5 h-3.5 text-purple-400" />
               保存预设
-            </button>
+            </button> */}
           </div>
+
+          {/* 方舟 API：首帧/尾帧 不能与 参考视频/音频 混用；与后端 buildContent 策略一致 */}
+          <div className="rounded-lg border border-gray-700/70 bg-[#141824] px-3 py-2 text-[11px] leading-relaxed text-gray-400">
+            <span className="text-amber-200/90 font-medium">参考素材</span>
+            ：仅上传参考图、且<strong className="text-gray-300 font-medium">没有</strong>参考视频/音频时，单张图会按「首帧图生视频」提交；一旦上传了参考视频或参考音频，参考图会一律按「多模态参考」提交（官方禁止混用两种接口模式）。若要在多模态下约束开场/结束画面，请在提示词里写清「首帧为图1」等描述。
+          </div>
+
           {/* Reference Images */}
           <div>
-            <div className="flex justify-between items-center mb-2">
-              <label className="text-sm font-bold text-gray-300">
-                参考图片 (全能参考)
-              </label>
+            <div className="flex justify-between items-center mb-2 gap-2 flex-wrap">
+              <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                <label className="text-sm font-bold text-gray-300 shrink-0">
+                  参考图片（全能参考）
+                </label>
+                {hasRefVideoOrAudio && images.length > 0 && (
+                  <span
+                    className="text-[10px] font-medium text-cyan-300/95 bg-cyan-500/10 border border-cyan-500/35 rounded px-1.5 py-0.5"
+                    title="当前请求将按「多模态参考」组装 content（图片 role 为 reference_image），与纯首帧模式不同"
+                  >
+                    多模态参考
+                  </span>
+                )}
+              </div>
               {images.length > 0 && (
                 <button
                   onClick={clearAllImages}
@@ -1251,6 +1351,38 @@ export default function SingleTaskPage() {
               }}
               className="flex flex-wrap gap-3"
             >
+              {selectedPortraitIds.map((id, i) => {
+                const p = portraits.find((x) => x.id === id);
+                if (!p) return null;
+                return (
+                  <div
+                    key={`portrait-${id}`}
+                    className="relative group w-20 h-20 flex-shrink-0"
+                  >
+                    <img
+                      src={p.previewUrl}
+                      alt={p.name}
+                      className="w-full h-full object-cover rounded-xl border border-violet-500/50"
+                    />
+                    <span className="absolute top-0.5 left-0.5 text-[8px] font-bold px-1 rounded bg-amber-500/90 text-black">
+                      库
+                    </span>
+                    <span className="absolute bottom-0 left-0 bg-black/70 text-[10px] text-violet-300 px-1.5 py-0.5 rounded-br-xl rounded-tl-xl font-medium">
+                      @{i + 1}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelectedPortraitIds((prev) => prev.filter((x) => x !== id))
+                      }
+                      title="取消选择此人像"
+                    >
+                      <CloseIcon className="w-3 h-3 text-white" />
+                    </button>
+                  </div>
+                );
+              })}
+
               {images.map((img) => (
                 <div
                   key={img.id}
@@ -1273,26 +1405,36 @@ export default function SingleTaskPage() {
                 </div>
               ))}
 
-              {/* 内联上传 tile，排在末尾，满了自动隐藏 */}
-              {images.length < maxImages && (
+              {images.length + selectedPortraitIds.length < maxImages && (
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
                   className="w-20 h-20 flex-shrink-0 border border-dashed border-gray-700 rounded-xl flex flex-col items-center justify-center bg-[#1c1f2e] cursor-pointer hover:border-purple-500/50 hover:bg-[#25293d] transition-all text-gray-500"
-                  title="点击或拖拽上传参考图（最多 9 张）"
+                  title="点击或拖拽上传参考图（库图+上传合计最多 9 张）"
                 >
                   <PlusIcon className="w-5 h-5" />
                   <span className="text-[10px] mt-1">
-                    {images.length === 0 ? '添加图片' : `${images.length}/${maxImages}`}
+                    {images.length + selectedPortraitIds.length === 0
+                      ? '添加图片'
+                      : `${images.length + selectedPortraitIds.length}/${maxImages}`}
                   </span>
                 </button>
               )}
             </div>
-            {images.length === 0 && (
-              <div className="text-[10px] text-gray-600 mt-1.5">
-                不上传则为纯文生视频
-              </div>
+            {images.length === 0 && selectedPortraitIds.length === 0 && (
+              <p className="text-[10px] text-gray-600 mt-1.5">不上传则为纯文生视频</p>
             )}
+
+            <PortraitLibrary
+              mtProjectId={mtProjectId}
+              enabled={isLuminiaModel}
+              selectedIds={selectedPortraitIds}
+              onSelectionChange={setSelectedPortraitIds}
+              maxTotalImages={maxImages}
+              uploadedImageCount={images.length}
+              onPortraitsChange={setPortraits}
+              pauseRefresh={showPromptModal}
+            />
 
             <input
               ref={fileInputRef}
@@ -1307,7 +1449,7 @@ export default function SingleTaskPage() {
             />
           </div>
 
-          {/* 校验提示横幅 */}
+          {/* 校验提示条 */}
           {(uploadError || uploadWarning) && (
             <div className="space-y-2">
               {uploadError && (
@@ -1325,7 +1467,7 @@ export default function SingleTaskPage() {
 
           {/* 参考视频 + 参考音频：并排两列 */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {/* Reference Videos (optional, 最多 maxVideos 段, 总 <=15s) */}
+          {/* Reference Videos (optional, 最多 maxVideos  总 <=15s) */}
           <div>
             <div className="flex justify-between items-center mb-2">
               <label className="text-sm font-bold text-gray-300">
@@ -1372,7 +1514,7 @@ export default function SingleTaskPage() {
                   type="button"
                   onClick={() => videoInputRef.current?.click()}
                   className="w-20 h-20 flex-shrink-0 border border-dashed border-gray-700 rounded-xl flex flex-col items-center justify-center bg-[#1c1f2e] cursor-pointer hover:border-purple-500/50 hover:bg-[#25293d] transition-all text-gray-500"
-                  title="点击上传参考视频 (mp4/mov · 单段 2-15s, ≤50MB)"
+                  title="点击上传参考视频 (mp4/mov · 单段 2-15s, 0MB)"
                 >
                   <PlusIcon className="w-5 h-5" />
                   <span className="text-[10px] mt-1">
@@ -1395,11 +1537,11 @@ export default function SingleTaskPage() {
             />
           </div>
 
-          {/* Reference Audios (optional, 最多 maxAudios 段, 总 <=15s) */}
+          {/* Reference Audios (optional, maxAudios  总 <=15s) */}
           <div>
             <div className="flex justify-between items-center mb-2">
               <label className="text-sm font-bold text-gray-300">
-                参考音频 ({audioItems.length}/{maxAudios}, 总 {audioItems.reduce((s, a) => s + a.duration, 0).toFixed(1)}s / 15s)
+                参考音频 ({audioItems.length}/{maxAudios}, {audioItems.reduce((s, a) => s + a.duration, 0).toFixed(1)}s / 15s)
               </label>
               {audioItems.length > 0 && (
                 <button
@@ -1447,7 +1589,7 @@ export default function SingleTaskPage() {
                   type="button"
                   onClick={() => audioInputRef.current?.click()}
                   className="flex-shrink-0 border border-dashed border-gray-700 rounded-xl flex items-center gap-1.5 px-4 py-2 bg-[#1c1f2e] cursor-pointer hover:border-purple-500/50 transition-all text-xs text-gray-500"
-                  title="点击上传参考音频 (mp3/wav · 单段 2-15s, ≤15MB)"
+                  title="点击上传参考音频 (mp3/wav · 单段 2-15s, 5MB)"
                 >
                   <PlusIcon className="w-4 h-4" />
                   {audioItems.length === 0 ? '添加音频' : `${audioItems.length}/${maxAudios}`}
@@ -1487,7 +1629,7 @@ export default function SingleTaskPage() {
               <span className="text-xs text-purple-400 opacity-0 group-hover:opacity-100 transition-opacity">点击展开编辑</span>
             </div>
             <div className="w-full bg-transparent text-sm min-h-[40px] max-h-[60px] overflow-hidden text-gray-200 leading-snug whitespace-pre-wrap">
-              {prompt || <span className="text-gray-600">点击此处编辑提示词...</span>}
+              {prompt || <span className="text-gray-600">点击此处编辑提示词…</span>}
             </div>
             <div className="text-right text-[10px] text-gray-500 mt-1">
               {prompt.length}/5000
@@ -1496,13 +1638,13 @@ export default function SingleTaskPage() {
 
           {/* Seedance 参数配置（紧接提示词下方，同属左列） */}
           <div className="bg-[#1c1f2e] rounded-2xl p-3 border border-gray-800 space-y-2.5">
-            {/* 模型（紧凑：两个选项水平并列） */}
+            {/* 模型（紧凑：两个选项水平并列）*/}
             <div>
               <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-1.5">
                 选择模型
               </label>
               <div className="grid grid-cols-2 gap-1.5">
-                {MODEL_OPTIONS.map((opt) => (
+                {modelOptions.map((opt) => (
                   <button
                     key={opt.value}
                     onClick={() => setModel(opt.value)}
@@ -1521,16 +1663,14 @@ export default function SingleTaskPage() {
                       {opt.label}
                     </div>
                     <div className="text-[10px] text-gray-500 mt-0 line-clamp-1 leading-tight">
-                      {opt.value === 'doubao-seedance-2-0-260128'
-                        ? '画质更好'
-                        : '更快，适合批量出稿'}
+                      {opt.description}
                     </div>
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* 画面比例（7 个按钮，一行 flex-wrap） */}
+            {/* 画面比例 · 分辨率 · flex-wrap）*/}
             <div>
               <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-1.5">
                 画面比例
@@ -1551,7 +1691,6 @@ export default function SingleTaskPage() {
                     <button
                       key={opt.value}
                       onClick={() => setRatio(opt.value)}
-                      title={isAdaptive ? '自适应：由模型根据素材自动决定比例' : opt.label}
                       className={`flex flex-col items-center gap-0.5 py-1 rounded-lg border transition-all ${
                         isSelected
                           ? 'border-purple-500 bg-purple-500/10'
@@ -1581,7 +1720,7 @@ export default function SingleTaskPage() {
                           isSelected ? 'text-purple-400' : 'text-gray-400'
                         }`}
                       >
-                        {isAdaptive ? '自适应' : opt.label}
+                        {opt.label}
                       </span>
                     </button>
                   );
@@ -1619,10 +1758,9 @@ export default function SingleTaskPage() {
                   分辨率
                 </label>
                 <div className="grid grid-cols-2 gap-1.5">
-                  {RESOLUTION_OPTIONS.map((r) => {
+                  {resolutionChoices.map((r) => {
                     const selected = resolution === r;
-                    const isFastModel = model === 'doubao-seedance-2-0-fast-260128';
-                    const is1080pDisabled = isFastModel && r === '1080p';
+                    const is1080pDisabled = !resolutionChoices.includes('1080p') && r === '1080p';
                     return (
                       <button
                         key={r}
@@ -1644,19 +1782,13 @@ export default function SingleTaskPage() {
               </div>
             </div>
 
-            {/* 开关行：有声视频 · 固定镜头 · 水印 */}
-            <div className="grid grid-cols-3 gap-1.5">
+            {/* 关：有声· 水印 */}
+            <div className="grid grid-cols-2 gap-1.5">
               <ToggleChip
                 label="有声视频"
-                tooltip="是否生成带音轨的视频（generate_audio）"
+                tooltip="尝试生成带音轨的视频（generate_audio）"
                 checked={generateAudio}
                 onChange={setGenerateAudio}
-              />
-              <ToggleChip
-                label="固定镜头"
-                tooltip="固定摄像头，不允许运镜（camera_fixed）"
-                checked={cameraFixed}
-                onChange={setCameraFixed}
               />
               <ToggleChip
                 label="添加水印"
@@ -1666,13 +1798,13 @@ export default function SingleTaskPage() {
               />
             </div>
 
-            {/* 种子（可选：空=随机） */}
+            {/* 种子（可选：留空随机）*/}
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">
                   种子 (Seed)
                 </label>
-                <span className="text-[10px] text-gray-500">空=随机，固定值可复现</span>
+                <span className="text-[10px] text-gray-500">留空随机，固定后可复现</span>
               </div>
               <div className="flex gap-1.5">
                 <input
@@ -1689,8 +1821,8 @@ export default function SingleTaskPage() {
                 <button
                   type="button"
                   onClick={() => setSeedInput(String(Math.floor(Math.random() * 2147483647)))}
-                  className="px-2.5 py-1 bg-[#161824] border border-gray-700 rounded-lg text-xs text-gray-300 hover:border-purple-500/60 hover:text-purple-300 transition-all"
                   title="生成一个随机种子"
+                  className="px-2.5 py-1 rounded-lg text-xs font-medium border border-gray-700 bg-[#161824] text-gray-300 hover:border-purple-500/50 hover:text-purple-300 transition-colors"
                 >
                   随机
                 </button>
@@ -1698,8 +1830,8 @@ export default function SingleTaskPage() {
                   <button
                     type="button"
                     onClick={() => setSeedInput('')}
-                    className="px-2.5 py-1 bg-[#161824] border border-gray-700 rounded-lg text-xs text-gray-500 hover:text-gray-300 transition-all"
                     title="清空（=随机）"
+                    className="px-2.5 py-1 rounded-lg text-xs font-medium border border-gray-700 bg-[#161824] text-gray-400 hover:border-gray-600 transition-colors"
                   >
                     清空
                   </button>
@@ -1708,7 +1840,7 @@ export default function SingleTaskPage() {
             </div>
           </div>
           </div>
-          {/* 右列：视频预览 + 生成/重置 — 视频区拉长填满剩余空间，lg 下吸附在视口内 */}
+          {/* 右列：视频预览 + 生成/重置 — 视频区拉长填满剩余空间，lg 下吸附在视口内*/}
           <div className="flex flex-col gap-4 min-w-0 pb-6 md:pb-0 lg:sticky lg:top-4 lg:self-start lg:h-[calc(100vh-6rem)] lg:min-h-[520px]">
             <div className="flex-1 min-h-[260px] flex flex-col">
               <ResultPreview
@@ -1719,6 +1851,22 @@ export default function SingleTaskPage() {
                 progress={generation.progress}
                 onOpen={() => setPlayerOpen(true)}
               />
+            </div>
+
+            {/* 费用估算 */}
+            <div className="flex-shrink-0 bg-gray-800/50 rounded-lg px-3 py-2 border border-gray-700/50">
+              <div className="text-xs text-gray-400 mb-1">预估费用</div>
+              {priceEstimate ? (
+                priceEstimate.minPrice === priceEstimate.maxPrice ? (
+                  <div className="text-sm font-bold text-cyan-300">{formatPrice(priceEstimate.minPrice)}</div>
+                ) : (
+                  <div className="text-sm font-bold text-cyan-300">
+                    {formatPrice(priceEstimate.minPrice)} ~ {formatPrice(priceEstimate.maxPrice)}
+                  </div>
+                )
+              ) : (
+                <div className="text-xs text-gray-500">暂无法估算费用</div>
+              )}
             </div>
 
             {/* 生成 / 重置 按钮 */}
@@ -1753,7 +1901,7 @@ export default function SingleTaskPage() {
         </div>
       </div>
 
-      {/* 视频预览弹窗（原右侧面板改为弹窗，点击顶部"查看视频"或生成完成/失败自动弹出） */}
+      {/* 视频预览弹窗（原右侧面板改为弹窗，点击顶栏「查看视频」或生成完成/失败时弹出） */}
       {playerOpen && (
         <div
           className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
@@ -1766,7 +1914,7 @@ export default function SingleTaskPage() {
               <div className="text-sm text-gray-300 font-medium flex items-center gap-2">
                 <FilmIcon className="w-4 h-4 text-purple-400" />
                 {isGenerating
-                  ? '正在生成视频…'
+                  ? '正在生成视频...'
                   : videoUrl
                     ? '生成完成'
                     : generation.status === 'error'
@@ -1794,7 +1942,7 @@ export default function SingleTaskPage() {
         </div>
       )}
 
-      {/* 提示词编辑弹窗 — 左右双栏对比 */}
+      {/* 提示词编辑弹窗左右双栏对比 */}
       {showPromptModal && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-[#1c1f2e] border border-gray-700 rounded-2xl w-full max-w-6xl max-h-[90vh] flex flex-col shadow-2xl">
@@ -1907,7 +2055,7 @@ export default function SingleTaskPage() {
                 <label className="block text-sm font-medium text-gray-400 mb-2">原始提示词</label>
 
                 <div className="flex-1 flex flex-row gap-3 min-h-0">
-                  {/* 左侧竖向素材缩略图条：点击插入 / 拖入编辑器任意位置 */}
+                  {/* 左侧竖向素材缩略图条：点击插入 / 拖入编辑器任意位置*/}
                   {modalAssets.length > 0 && (
                     <AssetStrip
                       assets={modalAssets}
@@ -1926,7 +2074,7 @@ export default function SingleTaskPage() {
                         assets={modalAssets}
                         autoFocus
                         minHeight={320}
-                        className="flex-1 w-full"
+                        className="flex-1 w-full min-h-0"
                         placeholder={"【绘画风格】如：3D渲染风格 / 电影质感 / 动漫风格\n【人物】@图1（角色名）、@图2（角色名）\n【道具】@图3（道具名）\n【场景】场景描述、光影氛围\n\n【分镜】\n镜头：中景 / 特写 / 全景，运镜方式\n动作：@图1（角色名）做什么动作...\n音效：环境音 / 特效音\n对话：角色台词\n\n提示：从左侧素材条把素材拖/点入提示词，或直接输入 @ 触发候选"}
                       />
                     </div>
@@ -1959,10 +2107,9 @@ export default function SingleTaskPage() {
                 <div className="flex-1 w-full bg-[#0f111a] border border-cyan-500/20 rounded-xl px-4 py-3 text-sm text-gray-200 leading-relaxed overflow-y-auto min-h-[360px]">
                   {aiOutput ? (
                     aiOptimizing ? (
-                      // 流式生成中：用纯文本展示，保留实时刷新感
+                      // 流式生成用纯文本展示，保留实时刷新感
                       <div className="whitespace-pre-wrap">{aiOutput}</div>
                     ) : (
-                      // 生成完成：用只读 PromptEditor，自动把 @图N/@视频N/@音频N 渲染成 chip
                       <PromptEditor
                         key={aiOutput}
                         value={aiOutput}
@@ -1976,7 +2123,7 @@ export default function SingleTaskPage() {
                   ) : aiOptimizing ? (
                     <span className="text-gray-600 animate-pulse">正在优化中...</span>
                   ) : (
-                    <span className="text-gray-600">点击右上角「Kimi AI 优化」按钮，AI 将基于左侧提示词生成优化版本</span>
+                    <span className="text-gray-600">点击右上角「Kimi AI 优化」按钮，将基于左侧提示词生成优化版本</span>
                   )}
                 </div>
               </div>
@@ -2018,3 +2165,4 @@ export default function SingleTaskPage() {
     </div>
   );
 }
+

@@ -23,23 +23,62 @@ import {
   scopeToTaskWhereClause,
 } from './services/downloadScopeService.js';
 import { findLocalUserIdForModelTooMember } from './services/modelTooLocalUserMatch.js';
-import { generateArkVideo, pollArkTaskUntilDone, bufferToDataUri } from './services/arkVideoGenerator.js';
-import { assertArkApiKeyOrExit, getArkApiKey } from './services/arkConfig.js';
+import { bufferToDataUri } from './services/arkVideoGenerator.js';
+import {
+  generateVideo,
+  pollVideoUntilDone,
+  listAvailableModels,
+  assertModelAllowed,
+  resolveProvider,
+  getProviderFlags,
+  assertAnyVideoProviderConfiguredOrExit,
+} from './services/videoProviderService.js';
+import { isArkApiKeyConfigured } from './services/arkConfig.js';
+import { isLuminiaApiKeyConfigured } from './services/luminiaConfig.js';
+import {
+  calculateCostFromTokens,
+  extractCompletionTokensFromResult,
+  extractTotalTokensFromResult,
+  normalizeModelId,
+} from './services/videoPricing.js';
 import {
   getOrUploadToTos,
   getOrUploadToTosByPath,
   cleanupExpiredTosCache,
   isTosConfigured,
+  isTosPersistConfigured,
+  getPresignedUrlForPersistKey,
 } from './services/tosUploader.js';
+import { schedulePersistGeneratedVideo } from './services/videoPersistPipeline.js';
+import * as projectPortraitService from './services/projectPortraitService.js';
+import {
+  enrichTaskWithPersistUrls,
+  enrichTasksWithPersistUrls,
+  buildPersistVideoProxyUrl,
+} from './services/taskPersistUrls.js';
+import { resolvePersistVideoKey, resolvePersistCoverKey } from './services/legacyPersistResolve.js';
+import {
+  servePersistImageBuffer,
+  streamPersistObjectToResponse,
+} from './services/persistImageServe.js';
+import { resolvePlayableVideoUrl } from './services/legacyVideoUrlRefresh.js';
 import { guessMimeType } from './services/arkFileUploader.js';
+import { verifyPersistViewTicket } from './services/persistViewTicket.js';
+import { verifyPortraitViewTicket } from './services/portraitViewTicket.js';
 import { writeIntegrationGenerateVideoArchive } from './services/taskArchiveServer.js';
+import {
+  saveTaskArchiveHtml,
+  pipeTaskArchiveHtml,
+  taskHasStoredArchive,
+} from './services/archivePersistService.js';
+import { getProjectsWithBalance, consumeBudget } from './services/modelTooInternalClient.js';
 
 /** 无论从哪个工作目录启动 node server/index.js，都读取项目根目录 .env（避免读不到 STUDIO_INTEGRATION_*） */
 const __serverDir = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__serverDir, '..', '.env') });
 
-// 启动时验证 ARK_API_KEY 已配置, 缺失则 fail-fast
-assertArkApiKeyOrExit();
+// 启动时至少配置一个视频 API Key
+assertAnyVideoProviderConfiguredOrExit();
 
 // 初始化数据库
 initDatabase();
@@ -183,7 +222,7 @@ const upload = multer({
 // 常量定义
 // ============================================================
 const downloadTokens = new Map();
-const DOWNLOAD_TOKEN_TTL_MS = 60 * 1000;
+const DOWNLOAD_TOKEN_TTL_MS = 5 * 60 * 1000;
 // 流式播放 token 存活更久, 浏览器一次预览可能持续数分钟
 const STREAM_TOKEN_TTL_MS = 30 * 60 * 1000;
 
@@ -447,6 +486,12 @@ app.post(
   const startTime = Date.now();
   let dbTaskId = null;
 
+  // Extract X-Project-Id header for ModelToo budget tracking
+  const projectIdHeader = req.headers['x-project-id'];
+  const estimatedPriceHeader = req.headers['x-estimated-price'];
+  let mtProjectId = null;
+  let mtIdempotencyKey = null;
+
   try {
     const {
       prompt,
@@ -455,7 +500,6 @@ app.post(
       model,
       resolution,
       seed,
-      camera_fixed: cameraFixedRaw,
       watermark: watermarkRaw,
       generate_audio: generateAudioRaw,
     } = req.body;
@@ -465,7 +509,6 @@ app.post(
       const s = String(v).toLowerCase();
       return s === '1' || s === 'true' || s === 'yes' || s === 'on';
     };
-    const cameraFixed = parseBool(cameraFixedRaw, false);
     const watermark = parseBool(watermarkRaw, false);
     const generateAudio = parseBool(generateAudioRaw, true);
     const seedNum =
@@ -479,10 +522,31 @@ app.post(
     const videoFiles = Array.isArray(fileMap.video) ? fileMap.video : [];
     const audioFiles = Array.isArray(fileMap.audio) ? fileMap.audio : [];
 
-    if (imageFiles.length === 0 && videoFiles.length === 0 && audioFiles.length === 0 && !(prompt || '').trim()) {
+    let portraitIds = [];
+    try {
+      const rawPortraitIds = req.body.portrait_ids;
+      if (rawPortraitIds) {
+        portraitIds = typeof rawPortraitIds === 'string' ? JSON.parse(rawPortraitIds) : rawPortraitIds;
+      }
+    } catch {
+      return res.status(400).json({ error: 'portrait_ids 格式无效，应为 JSON 数组' });
+    }
+    if (!Array.isArray(portraitIds)) portraitIds = [];
+
+    if (portraitIds.length + imageFiles.length > 9) {
+      return res.status(400).json({ error: '参考图片与人像库合计最多 9 张' });
+    }
+
+    if (
+      portraitIds.length === 0 &&
+      imageFiles.length === 0 &&
+      videoFiles.length === 0 &&
+      audioFiles.length === 0 &&
+      !(prompt || '').trim()
+    ) {
       return res
         .status(400)
-        .json({ error: '请至少提供一个素材 (图片/视频/音频) 或文本 Prompt' });
+        .json({ error: '请至少提供一个素材 (图片/视频/音频/人像库) 或文本 Prompt' });
     }
 
     const taskId = createTaskId();
@@ -502,6 +566,68 @@ app.post(
         req.studioActorLabel != null && req.studioActorLabel !== ''
           ? JSON.stringify({ creator_label: req.studioActorLabel, via: 'studio' })
           : null;
+      
+      // 提交时只校验余额（不扣费），扣费推迟到任务完成后按实际费用结算
+      if (projectIdHeader) {
+        console.log('[generate-video] X-Project-Id header found:', projectIdHeader);
+        console.log('[generate-video] X-Estimated-Price header:', estimatedPriceHeader);
+
+        try {
+          const { getProjectsWithBalance } = await import('./services/modelTooInternalClient.js');
+          const newTaskId = createTaskId();
+          mtIdempotencyKey = `sd-${newTaskId}`;
+          mtProjectId = projectIdHeader;
+
+          // 估算所需金额（使用前端预估的最大值）
+          let requiredAmount = parseFloat(estimatedPriceHeader) || 0;
+          if (!requiredAmount || isNaN(requiredAmount)) {
+            const durationSeconds = parseInt(duration) || 5;
+            requiredAmount = (durationSeconds / 5) * 1.85;
+          }
+
+          // 查询当前用户在该项目下的可用余额
+          const projects = await getProjectsWithBalance(req.user.email);
+          const proj = (projects || []).find((p) => String(p.project_id) === String(projectIdHeader));
+          if (!proj) {
+            console.warn('[generate-video] 用户在项目中未找到余额信息，project_id=', projectIdHeader);
+            return res.status(402).json({
+              code: 'INSUFFICIENT_BUDGET',
+              message: '未在项目中找到您的额度信息',
+            });
+          }
+
+          // 优先使用成员个人额度（如果是成员），否则使用项目池余额
+          const isMember = !!proj.is_member;
+          const availableBalance = Number(proj.balance || 0);
+
+          console.log('[generate-video] 余额校验:', {
+            projectId: projectIdHeader,
+            requiredAmount,
+            availableBalance,
+            isMember,
+          });
+
+          if (availableBalance < requiredAmount) {
+            console.log('[generate-video] 余额不足，拒绝提交');
+            return res.status(402).json({
+              code: isMember ? 'INSUFFICIENT_MEMBER_BUDGET' : 'INSUFFICIENT_BUDGET',
+              message: isMember ? '成员个人额度不足' : '余额不足',
+              balance: availableBalance,
+              required: requiredAmount,
+            });
+          }
+        } catch (checkError) {
+          console.error('[generate-video] 余额校验失败:', checkError.message);
+          // 校验失败时不扣费但允许继续（避免 ModelToo 暂时不可用阻塞业务）
+          if (checkError.status === 402) {
+            return res.status(402).json(checkError.detail || { error: '余额不足' });
+          }
+          // 其它错误：保留 mtProjectId/mtIdempotencyKey 以便结算
+        }
+      } else {
+        console.log('[generate-video] No X-Project-Id header found');
+      }
+      
       const createdTask = taskService.createTask({
         projectId: defaultProject.id,
         userId: req.user.id,
@@ -512,7 +638,13 @@ app.post(
         progress: '正在准备...',
         startedAt: new Date().toISOString(),
         duration: parseInt(duration) || 5,
+        resolution:
+          resolution !== undefined && resolution !== null && String(resolution).trim() !== ''
+            ? String(resolution).trim()
+            : null,
         accountInfo,
+        mtProjectId,
+        mtIdempotencyKey,
       });
       dbTaskId = createdTask.id;
       console.log(`[生成任务] 数据库记录已创建，db_task_id = ${dbTaskId}, project_id = ${defaultProject.id}`);
@@ -523,7 +655,7 @@ app.post(
     console.log(`\n========== [${taskId}] 收到视频生成请求 ==========`);
     console.log(`  prompt: ${(prompt || '').substring(0, 80)}${(prompt || '').length > 80 ? '...' : ''}`);
     console.log(`  model: ${model || 'doubao-seedance-2-0-260128'}, ratio: ${ratio || '16:9'}, duration: ${duration || 5}秒, resolution: ${resolution || '(默认)'}`);
-    console.log(`  seed=${seedNum ?? '(random)'} camera_fixed=${cameraFixed} watermark=${watermark} generate_audio=${generateAudio}`);
+    console.log(`  seed=${seedNum ?? '(random)'} watermark=${watermark} generate_audio=${generateAudio}`);
     console.log(`  images=${imageFiles.length} video=${videoFiles.length} audio=${audioFiles.length}`);
 
     // 显式 Content-Length + Connection:close，避免 chunked 响应与后续同步重负载叠加时 httpx 侧 ReadError
@@ -546,10 +678,11 @@ app.post(
           duration: parseInt(duration) || 5,
           resolution: resolution || '',
           seed: seedNum,
-          cameraFixed,
           watermark,
           generateAudio,
           creatorLabel: req.studioActorLabel || '',
+          portraitIds,
+          mtProjectId: projectIdHeader || '',
           imageFiles,
           videoFiles,
           audioFiles,
@@ -568,17 +701,38 @@ app.post(
       }
     };
 
-    let imageDataUris = [];
+    let imageUrls = [];
     let videoUrls = [];
     let audioUrls = [];
     try {
-      // === 图片: base64 data URI (官方支持 URL 或 Base64) ===
-      if (imageFiles.length > 0) {
-        logProgress(`正在处理 ${imageFiles.length} 张图片...`);
-        imageDataUris = imageFiles.map((f, i) => {
-          logProgress(`图片 ${i + 1}/${imageFiles.length}: ${f.originalname} → base64`);
-          return bufferToDataUri(f.buffer, f.mimetype, f.originalname);
+      let modelIdForPortrait = model || settingsService.getSetting('model') || 'luminia-2.0';
+      if (portraitIds.length > 0) {
+        if (!projectIdHeader) {
+          throw new Error('使用虚拟人像库需先选择 ModelToo 项目');
+        }
+        projectPortraitService.assertPortraitsAllowedForModel(modelIdForPortrait);
+        const portraits = projectPortraitService.getPortraitsForGeneration({
+          ids: portraitIds,
+          mtProjectId: projectIdHeader,
         });
+        imageUrls.push(...projectPortraitService.buildPortraitAssetUrls(portraits));
+        logProgress(`已引用 ${portraits.length} 个库中人像 (asset://)`);
+      }
+
+      // === 图片: 上传 TOS → 预签名 URL (避免 payload too large) ===
+      for (let i = 0; i < imageFiles.length; i++) {
+        const f = imageFiles[i];
+        logProgress(`图片 ${i + 1}/${imageFiles.length}: ${f.originalname} 上传到 TOS...`);
+        const r = await getOrUploadToTos(f.buffer, {
+          filename: f.originalname,
+          mimeType: f.mimetype,
+          onProgress: (stage, detail) => {
+            if (stage === 'cache_hit') logProgress(`图片 ${i + 1}: TOS 缓存命中`);
+            else if (stage === 'uploading') logProgress(`图片 ${i + 1}: ${f.originalname} 上传中...`);
+            else if (stage === 'uploaded') logProgress(`图片 ${i + 1}: ✓ 上传完成`);
+          },
+        });
+        imageUrls.push(r.url);
       }
 
       // === 视频: 上传 TOS → 预签名 URL (Content Generation API 只认公网 URL) ===
@@ -612,7 +766,7 @@ app.post(
         audioUrls.push(r.url);
       }
 
-      logProgress(`素材准备完成 ✓ (图片=${imageDataUris.length} 视频=${videoUrls.length} 音频=${audioUrls.length})`);
+      logProgress(`素材准备完成 ✓ (图片=${imageUrls.length} 视频=${videoUrls.length} 音频=${audioUrls.length})`);
     } catch (uploadErr) {
       const msg = `素材准备失败: ${uploadErr.message}`;
       console.error(`[${taskId}] ${msg}`);
@@ -624,22 +778,37 @@ app.post(
       return;
     }
 
-    generateArkVideo({
-      model: model || 'doubao-seedance-2-0-260128',
+    let modelId;
+    let videoProvider;
+    try {
+      modelId = model || settingsService.getSetting('model') || 'luminia-2.0';
+      assertModelAllowed(modelId);
+      videoProvider = resolveProvider(modelId);
+    } catch (modelErr) {
+      const msg = modelErr.message || '模型不可用';
+      task.status = 'error';
+      task.error = msg;
+      if (dbTaskId) {
+        try { taskService.updateTaskStatus(dbTaskId, 'error', { progress: '', error_message: msg }); } catch (_) {}
+      }
+      return;
+    }
+
+    generateVideo({
+      model: modelId,
       prompt: prompt || '',
-      imageUrls: imageDataUris,
+      imageUrls: imageUrls,
       videoUrls: videoUrls,
       audioUrls: audioUrls,
       ratio: ratio || '16:9',
       duration: parseInt(duration) || 5,
       resolution: resolution || undefined,
       seed: seedNum,
-      cameraFixed,
       generateAudio,
       watermark,
       onProgress: async (progress) => {
         task.progress = progress;
-        console.log(`[${taskId}] [ark] ${progress}`);
+        console.log(`[${taskId}] [${videoProvider}] ${progress}`);
         if (dbTaskId) {
           try { taskService.updateTask(dbTaskId, { progress }); } catch (_) {}
         }
@@ -650,6 +819,7 @@ app.post(
             taskService.updateTask(dbTaskId, {
               submit_id: submitId,
               submitted_at: new Date().toISOString(),
+              video_provider: videoProvider,
             });
           } catch (_) {}
         }
@@ -676,22 +846,92 @@ app.post(
 
         if (dbTaskId) {
           try {
-            taskService.updateTaskStatus(dbTaskId, 'done', {
-              submit_id: result.submitId || null,
-              history_id: result.historyId || null,
-              item_id: result.itemId || null,
-              video_url: result.videoUrl,
-              progress: '',
-              error_message: null,
-              revised_prompt: result.revisedPrompt || null,
-            });
-          } catch (dbError) {
-            console.error('[生成任务] 更新数据库记录失败:', dbError.message);
+            const totalTokens = extractTotalTokensFromResult(result);
+            const completionTokens = extractCompletionTokensFromResult(result);
+            console.log(`[${taskId}] tokens 提取: total_tokens=${totalTokens}, completion_tokens=${completionTokens}, usage=${JSON.stringify(result.raw?.usage || result.usage || {})}`);
+            if (totalTokens == null) {
+              console.warn(`[${taskId}] ⚠️ 未返回 usage.total_tokens，raw.keys=${Object.keys(result.raw || {}).join(',')}`);
+            }
+
+            const modelId = normalizeModelId(model || 'doubao-seedance-2-0-260128');
+            const outputResolution =
+              resolution && String(resolution).trim() ? String(resolution).trim() : '720p';
+            const hasVideoInput = videoUrls.length > 0;
+            const { cost, unitPrice, pricingUnit, provider: pricingProvider } = calculateCostFromTokens(
+              totalTokens,
+              modelId,
+              { resolution: outputResolution, hasVideoInput },
+            );
+            if (totalTokens != null && unitPrice == null) {
+              console.warn(
+                `[${taskId}] ⚠️ 无法确定单价 model=${modelId} resolution=${outputResolution} hasVideoInput=${hasVideoInput}`,
+              );
+            } else if (cost != null) {
+              console.log(
+                `[${taskId}] cost 计算: total_tokens=${totalTokens}, unit_price=${unitPrice} (${pricingUnit}), provider=${pricingProvider}, cost=${cost}`,
+              );
+            }
+
+            console.log(`[${taskId}] 准备更新数据库: db_task_id=${dbTaskId}, total_tokens=${totalTokens}, cost=${cost}, unit_price=${unitPrice}`);
+            try {
+              taskService.updateTaskStatus(dbTaskId, 'done', {
+                submit_id: result.submitId || null,
+                history_id: result.historyId || null,
+                item_id: result.itemId || null,
+                video_url: result.videoUrl,
+                progress: '',
+                error_message: null,
+                revised_prompt: result.revisedPrompt || null,
+                total_tokens: totalTokens,
+                completion_tokens: completionTokens,
+                cost: cost,
+                unit_price: unitPrice,
+              });
+              console.log(`[${taskId}] 数据库更新成功`);
+
+              // 结算：按实际费用扣一次费用（allow_negative=true，允许负余额）
+              if (cost !== null && cost > 0 && mtProjectId) {
+                console.log(`[${taskId}] 开始结算扣费: ${cost}`);
+                (async () => {
+                  try {
+                    const { consumeBudget } = await import('./services/modelTooInternalClient.js');
+                    const settleResult = await consumeBudget({
+                      projectId: mtProjectId,
+                      amount: cost,
+                      idempotencyKey: mtIdempotencyKey,
+                      userId: req.user.email,
+                      actorUserId: req.user.email,
+                      source: 'sd',
+                      metadata: {
+                        service: 'sd-video',
+                        task_id: dbTaskId,
+                        model: modelId,
+                        total_tokens: totalTokens,
+                        unit_price: unitPrice,
+                        pricing_unit: pricingUnit,
+                        provider: pricingProvider,
+                      },
+                      allowNegative: true,
+                    });
+                    console.log(`[${taskId}] 结算扣费成功: ${cost}, 余额: ${settleResult.balance}`);
+                  } catch (settleError) {
+                    console.error(`[${taskId}] 结算扣费失败:`, settleError.message);
+                  }
+                })();
+              }
+
+              schedulePersistGeneratedVideo(dbTaskId, result.videoUrl);
+            } catch (dbError) {
+              console.error('[生成任务] 更新数据库记录失败:', dbError.message);
+            }
+          } catch (error) {
+            console.error('[生成任务] 处理 tokens 和 cost 失败:', error.message);
           }
         }
       })
       .catch((err) => {
         task.status = 'error';
+// ...
         task.error = err.message || '视频生成失败';
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         console.error(`========== [${taskId}] ❌ 视频生成失败 (${elapsed}秒): ${err.message} ==========\n`);
@@ -791,6 +1031,93 @@ app.get('/api/video-proxy', async (req, res) => {
   }
 });
 
+// GET /api/tos/persist-image - 同源代理：服务端拉图/缩放后输出（勿 307 到 volces，远程机才能看封面）
+app.get('/api/tos/persist-image', async (req, res) => {
+  const { ticket, variant = 'full' } = req.query;
+
+  if (!ticket || typeof ticket !== 'string') {
+    console.log('[tos-persist-image] 缺少 ticket 参数');
+    return res.status(400).json({ error: '缺少 ticket 参数' });
+  }
+
+  if (!['full', 'list', 'download', 'video', 'cover'].includes(variant)) {
+    console.log('[tos-persist-image] 无效的 variant 参数:', variant);
+    return res.status(400).json({ error: '无效的 variant 参数' });
+  }
+
+  // 验证 ticket
+  const payload = verifyPersistViewTicket(ticket);
+  if (!payload) {
+    console.log('[tos-persist-image] ticket 验证失败');
+    return res.status(401).json({ error: '无效或已过期的 ticket' });
+  }
+
+  const { tid: taskId, vid: viewerId, adm: isAdmin } = payload;
+  console.log(`[tos-persist-image] ticket 验证成功: taskId=${taskId}, viewerId=${viewerId}, isAdmin=${isAdmin}`);
+
+  try {
+    const db = getDatabase();
+    const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+
+    if (!task) {
+      console.log(`[tos-persist-image] 任务不存在: taskId=${taskId}`);
+      return res.status(404).json({ error: '任务不存在' });
+    }
+
+    console.log(`[tos-persist-image] 找到任务: user_id=${task.user_id}, persist_video_key=${task.persist_video_key ? 'yes' : 'no'}, persist_cover_key=${task.persist_cover_key ? 'yes' : 'no'}`);
+
+    // 权限检查：使用与下载页面相同的权限逻辑（支持组长查看组内成员任务）
+    const mockReq = { user: { id: viewerId, role: isAdmin ? 'admin' : 'member' } };
+    await assertDownloadTaskAccessible(mockReq, task.user_id);
+    console.log(`[tos-persist-image] 权限检查通过`);
+
+    const isVideoVariant = variant === 'video';
+    const key = isVideoVariant
+      ? resolvePersistVideoKey(task)
+      : resolvePersistCoverKey(task);
+    if (!key) {
+      console.log(`[tos-persist-image] 任务未持久化到 TOS: taskId=${taskId}, variant=${variant}`);
+      return res.status(404).json({ error: '任务未持久化到 TOS' });
+    }
+
+    const bucket = process.env.TOS_PERSIST_BUCKET || '';
+    if (!bucket) {
+      console.log('[tos-persist-image] 未配置持久桶');
+      return res.status(503).json({ error: '未配置持久桶' });
+    }
+
+    if (variant === 'video') {
+      console.log(`[tos-persist-image] 流式转发视频 task=${taskId} key=${key}`);
+      if (req.query.disposition === 'attachment') {
+        const name =
+          (task.video_path && String(task.video_path).split(/[/\\]/).pop())
+          || `task-${taskId}.mp4`;
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
+        );
+      }
+      await streamPersistObjectToResponse(res, key);
+      return;
+    }
+
+    const imageVariant =
+      variant === 'cover' || variant === 'download' || variant === 'list' ? variant : 'full';
+    const { buffer, contentType } = await servePersistImageBuffer(key, imageVariant);
+    console.log(`[tos-persist-image] 流式出图 task=${taskId} variant=${variant} bytes=${buffer.length}`);
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.send(buffer);
+  } catch (error) {
+    if (error.statusCode === 403) {
+      console.log(`[tos-persist-image] 权限检查失败: ${error.message}`);
+      return res.status(403).json({ error: '无权查看该资源' });
+    }
+    console.error('[tos-persist-image] 错误:', error);
+    res.status(502).json({ error: 'TOS 预签名失败' });
+  }
+});
+
 // multer 错误处理
 app.use((err, _req, res, _next) => {
   if (err instanceof multer.MulterError) {
@@ -847,6 +1174,136 @@ app.get('/api/projects/:id', authenticate, (req, res) => {
   }
 });
 
+// -------------------- 虚拟人像库（Luminia assets，按 ModelToo 项目隔离）--------------------
+app.get('/api/portraits', authenticate, async (req, res) => {
+  try {
+    const mtProjectId = String(req.query.mt_project_id || req.headers['x-project-id'] || '').trim();
+    if (!mtProjectId) {
+      return res.status(400).json({ error: '缺少 mt_project_id（或请求头 X-Project-Id）' });
+    }
+    const list = await projectPortraitService.syncProcessingPortraits({
+      mtProjectId,
+      viewerUserId: req.user.id,
+      viewerIsAdmin: req.user.role === 'admin',
+    });
+    res.json({ success: true, data: list });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post(
+  '/api/portraits',
+  authenticate,
+  upload.single('file'),
+  async (req, res) => {
+    try {
+      const mtProjectId = String(req.body.mt_project_id || req.headers['x-project-id'] || '').trim();
+      if (!mtProjectId) {
+        return res.status(400).json({ error: '缺少 mt_project_id（或请求头 X-Project-Id）' });
+      }
+      if (!req.file?.buffer) {
+        return res.status(400).json({ error: '请上传人像图片文件' });
+      }
+      const name = String(req.body.name || req.file.originalname || '未命名人像').trim();
+      const portrait = await projectPortraitService.registerPortraitFromUpload({
+        userId: req.user.id,
+        mtProjectId,
+        name,
+        buffer: req.file.buffer,
+        filename: req.file.originalname,
+        mimeType: req.file.mimetype,
+      });
+      const data = projectPortraitService.enrichPortraitForViewer(
+        portrait,
+        req.user.id,
+        req.user.role === 'admin',
+      );
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
+// GET /api/portraits/:id/preview — 同源代理列表预览（ticket，img 无法带 Bearer）
+app.get('/api/portraits/:id/preview', async (req, res) => {
+  const ticket = typeof req.query.ticket === 'string' ? req.query.ticket : '';
+  const mtProjectId = String(req.query.mt_project_id || '').trim();
+  const portraitId = Number(req.params.id);
+
+  if (!ticket) {
+    return res.status(400).json({ error: '缺少 ticket 参数' });
+  }
+  if (!mtProjectId) {
+    return res.status(400).json({ error: '缺少 mt_project_id 参数' });
+  }
+  if (!Number.isFinite(portraitId)) {
+    return res.status(400).json({ error: '无效的人像 ID' });
+  }
+
+  const payload = verifyPortraitViewTicket(ticket);
+  if (!payload) {
+    return res.status(401).json({ error: '无效或已过期的 ticket' });
+  }
+  if (String(payload.pid) !== String(portraitId) || String(payload.proj) !== mtProjectId) {
+    return res.status(401).json({ error: 'ticket 与人像不匹配' });
+  }
+
+  try {
+    const buf = await projectPortraitService.getPortraitListPreviewBuffer({
+      id: portraitId,
+      mtProjectId,
+    });
+    res.setHeader('Content-Type', 'image/webp');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.send(buf);
+  } catch (error) {
+    const code = error.statusCode || 502;
+    if (code >= 500) {
+      console.error('[portrait-preview] 错误:', error);
+    }
+    res.status(code).json({ error: error.message || '预览失败' });
+  }
+});
+
+// 归档：拉取人像库缩略图（同源鉴权，避免浏览器直连 TOS 预签名 CORS）
+app.get('/api/portraits/:id/archive-thumb', authenticate, async (req, res) => {
+  try {
+    const mtProjectId = String(req.query.mt_project_id || req.headers['x-project-id'] || '').trim();
+    if (!mtProjectId) {
+      return res.status(400).json({ error: '缺少 mt_project_id（或请求头 X-Project-Id）' });
+    }
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: '无效的人像 ID' });
+    }
+    const buf = await projectPortraitService.getPortraitArchiveThumbBuffer({ id, mtProjectId });
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.send(buf);
+  } catch (error) {
+    const code = error.statusCode || 500;
+    res.status(code).json({ error: error.message });
+  }
+});
+
+app.delete('/api/portraits/:id', authenticate, async (req, res) => {
+  try {
+    const mtProjectId = String(req.query.mt_project_id || req.headers['x-project-id'] || '').trim();
+    if (!mtProjectId) {
+      return res.status(400).json({ error: '缺少 mt_project_id（或请求头 X-Project-Id）' });
+    }
+    await projectPortraitService.deletePortrait({
+      id: Number(req.params.id),
+      mtProjectId,
+    });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // PUT /api/projects/:id - 更新项目
 app.put('/api/projects/:id', authenticate, (req, res) => {
   try {
@@ -895,7 +1352,7 @@ app.delete('/api/projects/:id', authenticate, (req, res) => {
 });
 
 // GET /api/projects/:id/tasks - 获取项目下的任务列表
-app.get('/api/projects/:id/tasks', authenticate, (req, res) => {
+app.get('/api/projects/:id/tasks', authenticate, async (req, res) => {
   try {
     const isAdmin = req.user.role === 'admin';
     const project = projectService.getProjectById(req.params.id, req.user.id, isAdmin);
@@ -904,12 +1361,13 @@ app.get('/api/projects/:id/tasks', authenticate, (req, res) => {
     }
 
     const { status, taskKind, sourceTaskId, rowGroupId } = req.query;
-    const tasks = taskService.getTasksByProjectId(req.params.id, {
+    let tasks = taskService.getTasksByProjectId(req.params.id, {
       status: typeof status === 'string' ? status : undefined,
       taskKind: typeof taskKind === 'string' ? taskKind : undefined,
       sourceTaskId: sourceTaskId !== undefined ? Number(sourceTaskId) : undefined,
       rowGroupId: typeof rowGroupId === 'string' ? rowGroupId : undefined,
     }, req.user.id, isAdmin);
+    tasks = await enrichTasksWithPersistUrls(tasks, req.user.id, isAdmin);
     res.json({ success: true, data: tasks });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -918,13 +1376,14 @@ app.get('/api/projects/:id/tasks', authenticate, (req, res) => {
 
 // -------------------- 任务管理 --------------------
 // GET /api/tasks/:id - 获取任务详情
-app.get('/api/tasks/:id', authenticate, (req, res) => {
+app.get('/api/tasks/:id', authenticate, async (req, res) => {
   try {
     const isAdmin = req.user.role === 'admin';
-    const task = taskService.getTaskById(req.params.id, req.user.id, isAdmin);
+    let task = taskService.getTaskById(req.params.id, req.user.id, isAdmin);
     if (!task) {
       return res.status(404).json({ error: '任务不存在或无权访问' });
     }
+    task = await enrichTaskWithPersistUrls(task, req.user.id, isAdmin);
     res.json({ success: true, data: task });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1091,6 +1550,33 @@ app.post('/api/tasks/:id/generate', authenticate, async (req, res) => {
       return res.status(404).json({ error: '任务不存在' });
     }
 
+    // 获取选中的项目
+    const selectedProjectId = req.body.project_id || req.query.project_id;
+    if (!selectedProjectId) {
+      return res.status(400).json({ error: '请先选择项目' });
+    }
+
+    // 检查项目余额
+    try {
+      const projects = await getProjectsWithBalance(req.user.email);
+      const project = projects.find(p => p.project_id === selectedProjectId);
+      if (!project) {
+        return res.status(400).json({ error: '未找到选中的项目' });
+      }
+      
+      // 估算任务成本（简化版：假设每个任务至少消耗 0.5 元）
+      const estimatedCost = 0.5;
+      if (project.balance < estimatedCost) {
+        return res.status(402).json({ 
+          error: '余额不足',
+          detail: `当前余额: ${project.balance} 点，预估需要: ${estimatedCost} 点`
+        });
+      }
+    } catch (error) {
+      console.error('检查余额失败:', error);
+      return res.status(503).json({ error: '无法检查余额，请稍后重试' });
+    }
+
     if (task.task_kind === 'draft') {
       const validation = validateBatchTasks(task.project_id, [task.id], req.user.id, isAdmin);
       if (validation.error) {
@@ -1153,6 +1639,11 @@ app.post('/api/tasks/:id/generate', authenticate, async (req, res) => {
     const audioAssets = assets.filter(a => a.asset_type === 'audio');
     const settings = settingsService.getAllSettings();
 
+    const outputResolution =
+      settings.resolution != null && String(settings.resolution).trim() !== ''
+        ? String(settings.resolution).trim()
+        : null;
+
     if (imageAssets.length === 0 && videoAssets.length === 0 && audioAssets.length === 0 && !(task.prompt || '').trim()) {
       return res.status(400).json({ error: '任务缺少素材或 Prompt, 无法提交' });
     }
@@ -1167,6 +1658,7 @@ app.post('/api/tasks/:id/generate', authenticate, async (req, res) => {
       video_url: null,
       completed_at: null,
       submitted_at: null,
+      resolution: outputResolution,
     });
 
     res.json({
@@ -1230,14 +1722,28 @@ app.post('/api/tasks/:id/generate', authenticate, async (req, res) => {
       return;
     }
 
-    generateArkVideo({
-      model: settings.model || 'doubao-seedance-2-0-260128',
+    const modelId = settings.model || 'luminia-2.0';
+    let videoProvider;
+    try {
+      assertModelAllowed(modelId);
+      videoProvider = resolveProvider(modelId);
+    } catch (modelErr) {
+      taskService.updateTaskStatus(task.id, 'error', {
+        progress: '',
+        error_message: modelErr.message || '模型不可用',
+      });
+      return;
+    }
+
+    generateVideo({
+      model: modelId,
       prompt: task.prompt,
       imageUrls,
       videoUrls,
       audioUrls,
       ratio: settings.ratio || '16:9',
       duration: parseInt(settings.duration) || 5,
+      resolution: outputResolution || undefined,
       generateAudio: true,
       watermark: false,
       onProgress: async (progress) => {
@@ -1249,6 +1755,7 @@ app.post('/api/tasks/:id/generate', authenticate, async (req, res) => {
           taskService.updateTask(task.id, {
             submit_id: submitId,
             submitted_at: new Date().toISOString(),
+            video_provider: videoProvider,
           });
         } catch (_) {}
       },
@@ -1265,6 +1772,17 @@ app.post('/api/tasks/:id/generate', authenticate, async (req, res) => {
       },
     })
       .then((result) => {
+        const totalTokens = extractTotalTokensFromResult(result);
+        const completionTokens = extractCompletionTokensFromResult(result);
+        const billingModelId = normalizeModelId(modelId);
+        const taskResolution = outputResolution || settings.resolution || '720p';
+        const hasVideoInput = videoUrls.length > 0;
+        const { cost, unitPrice, pricingUnit, provider: pricingProvider } = calculateCostFromTokens(
+          totalTokens,
+          billingModelId,
+          { resolution: taskResolution, hasVideoInput },
+        );
+
         taskService.updateTaskStatus(task.id, 'done', {
           submit_id: result.submitId || null,
           history_id: result.historyId || null,
@@ -1272,13 +1790,49 @@ app.post('/api/tasks/:id/generate', authenticate, async (req, res) => {
           video_url: result.videoUrl,
           progress: '',
           error_message: null,
+          total_tokens: totalTokens,
+          completion_tokens: completionTokens,
+          cost: cost,
+          unit_price: unitPrice,
         });
+        schedulePersistGeneratedVideo(task.id, result.videoUrl);
         console.log(`[task ${task.id}] 视频生成成功：${result.videoUrl}`);
+
+        // 结算：按实际费用扣一次费用（allow_negative=true）
+        if (cost !== null && cost > 0 && selectedProjectId) {
+          (async () => {
+            try {
+              const settleResult = await consumeBudget({
+                projectId: selectedProjectId,
+                amount: cost,
+                idempotencyKey: `task-${task.id}-settle`,
+                userId: req.user.email,
+                actorUserId: req.user.email,
+                source: 'sd',
+                metadata: {
+                  task_id: task.id,
+                  model: billingModelId,
+                  total_tokens: totalTokens,
+                  unit_price: unitPrice,
+                  pricing_unit: pricingUnit,
+                  provider: pricingProvider,
+                },
+                allowNegative: true,
+              });
+              console.log(`[task ${task.id}] 结算扣费成功: ${cost}, 余额: ${settleResult.balance}`);
+            } catch (settleError) {
+              console.error(`[task ${task.id}] 结算扣费失败:`, settleError.message);
+            }
+          })();
+        }
       })
       .catch((err) => {
+        const totalTokens = err.raw?.usage?.total_tokens || 0;
+
         taskService.updateTaskStatus(task.id, 'error', {
           progress: '',
           error_message: err.message,
+          total_tokens: totalTokens,
         });
         console.error(`[task ${task.id}] 视频生成失败：${err.message}`);
       });
@@ -1392,24 +1946,14 @@ app.post('/api/tasks/:id/open-folder', authenticate, async (req, res) => {
 });
 
 // -------------------- 任务归档 --------------------
-// 单文件 HTML 归档存放目录: data/archives/{task_id}.html
-// 归档由客户端在 POST /api/generate-video 返回成功后立即构建并上传,
-// 包含提示词 + 输入素材预览 (图片/视频首帧压缩 JPEG, 音频仅文件名).
-
-const ARCHIVE_DIR = path.join(__dirname, '../data/archives');
-
-function ensureArchiveDir() {
-  if (!fs.existsSync(ARCHIVE_DIR)) {
-    fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
-  }
-}
+// 配置 TOS_PERSIST_BUCKET 时 HTML 写入持久桶（见 archivePersistService），否则落盘 data/archives/
 
 // POST /api/tasks/:id/archive - 上传任务归档 HTML (text/html body)
 app.post(
   '/api/tasks/:id/archive',
   authenticate,
   express.text({ type: ['text/html', 'text/plain'], limit: '50mb' }),
-  (req, res) => {
+  async (req, res) => {
     try {
       const isAdmin = req.user.role === 'admin';
       const task = taskService.getTaskById(req.params.id, req.user.id, isAdmin);
@@ -1417,38 +1961,32 @@ app.post(
         return res.status(404).json({ error: '任务不存在或无权访问' });
       }
       const html = typeof req.body === 'string' ? req.body : '';
-      if (!html || html.length < 20) {
-        return res.status(400).json({ error: '归档内容为空' });
-      }
-      ensureArchiveDir();
-      const filePath = path.join(ARCHIVE_DIR, `${task.id}.html`);
-      fs.writeFileSync(filePath, html, 'utf-8');
-      taskService.updateTask(task.id, { archive_path: filePath });
-      console.log(`[archive] task ${task.id} 归档已保存 (${(html.length / 1024).toFixed(1)} KB) → ${filePath}`);
-      res.json({ success: true, size: html.length });
+      const saved = await saveTaskArchiveHtml(task.id, html);
+      taskService.updateTask(task.id, saved);
+      res.json({ success: true, size: saved.size, persisted: !!saved.persist_archive_key });
     } catch (error) {
       console.error('[archive] 保存失败:', error);
-      res.status(500).json({ error: error.message });
+      const code = error.message === '归档内容为空' ? 400 : 500;
+      res.status(code).json({ error: error.message });
     }
   },
 );
 
 // GET /api/tasks/:id/archive - 获取归档 HTML 原文 (直接返回 HTML, 用于前端 fetch blob)
-app.get('/api/tasks/:id/archive', authenticate, (req, res) => {
+app.get('/api/tasks/:id/archive', authenticate, async (req, res) => {
   try {
     const isAdmin = req.user.role === 'admin';
     const task = taskService.getTaskById(req.params.id, req.user.id, isAdmin);
     if (!task) {
       return res.status(404).json({ error: '任务不存在或无权访问' });
     }
-    if (!task.archive_path || !fs.existsSync(task.archive_path)) {
+    if (!taskHasStoredArchive(task)) {
       return res.status(404).json({ error: '归档不存在' });
     }
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    // 允许前端 fetch 读取为 blob 后 URL.createObjectURL 打开新窗
-    fs.createReadStream(task.archive_path).pipe(res);
+    await pipeTaskArchiveHtml(task, res);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    const code = error.statusCode || 500;
+    res.status(code).json({ error: error.message });
   }
 });
 
@@ -1597,11 +2135,42 @@ app.get('/api/settings', (req, res) => {
 });
 
 // PUT /api/settings - 更新全局设置
-app.put('/api/settings', (req, res) => {
+app.put('/api/settings', authenticate, (req, res) => {
   try {
-    const settings = req.body;
-    const updated = settingsService.updateSettings(settings);
+    const settings = req.body || {};
+    const isAdmin = req.user?.role === 'admin';
+    const hasAdminKeys = Object.keys(settings).some((k) => settingsService.isAdminSettingKey(k));
+    if (hasAdminKeys && !isAdmin) {
+      return res.status(403).json({ error: '仅管理员可修改平台开关' });
+    }
+    const updated = settingsService.updateSettings(settings, { allowAdminKeys: isAdmin });
     res.json({ success: true, data: updated });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/models - 可用视频模型（已按平台开关与 Key 过滤）
+app.get('/api/models', authenticate, (_req, res) => {
+  try {
+    const models = listAvailableModels();
+    const flags = getProviderFlags();
+    res.json({
+      success: true,
+      data: {
+        models,
+        providers: {
+          ark: {
+            enabled: flags.arkEnabled,
+            keyConfigured: flags.arkKeyConfigured,
+          },
+          luminia: {
+            enabled: flags.luminiaEnabled,
+            keyConfigured: flags.luminiaKeyConfigured,
+          },
+        },
+      },
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1609,8 +2178,26 @@ app.put('/api/settings', (req, res) => {
 
 // GET /api/settings/ark-status - 检查方舟 API Key 是否已配置 (只返回是/否, 不泄漏 Key)
 app.get('/api/settings/ark-status', authenticate, (_req, res) => {
-  const configured = Boolean((process.env.ARK_API_KEY || '').trim());
-  res.json({ success: true, data: { configured } });
+  res.json({ success: true, data: { configured: isArkApiKeyConfigured() } });
+});
+
+// GET /api/settings/luminia-status
+app.get('/api/settings/luminia-status', authenticate, (_req, res) => {
+  res.json({ success: true, data: { configured: isLuminiaApiKeyConfigured() } });
+});
+
+// GET /api/settings/provider-status - 平台开关 + Key 状态
+app.get('/api/settings/provider-status', authenticate, (_req, res) => {
+  const flags = getProviderFlags();
+  res.json({
+    success: true,
+    data: {
+      provider_ark_enabled: flags.arkEnabled,
+      provider_luminia_enabled: flags.luminiaEnabled,
+      arkKeyConfigured: flags.arkKeyConfigured,
+      luminiaKeyConfigured: flags.luminiaKeyConfigured,
+    },
+  });
 });
 
 // -------------------- 下载 API --------------------
@@ -1642,12 +2229,41 @@ function sendDownloadedVideoFile(res, result) {
   res.download(result.filePath, result.filename);
 }
 
+function buildVideoProxyPath(externalUrl) {
+  return `/api/video-proxy?url=${encodeURIComponent(externalUrl)}`;
+}
+
+/** 本地 video_path 失效时，用已落 TOS 的 key 同源出流（download token 已校验权限） */
+async function tryStreamPersistVideoForTask(res, taskId, opts = {}) {
+  const db = getDatabase();
+  const row = db.prepare(`
+    SELECT persist_video_key, persist_video_tos_url, video_url,
+      history_id, submit_id, item_id, video_provider
+    FROM tasks WHERE id = ?
+  `).get(taskId);
+  if (!row) return false;
+  const videoKey = resolvePersistVideoKey({ ...row, id: Number(taskId) });
+  if (!videoKey || !isTosPersistConfigured()) return false;
+  if (opts.attachment) {
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(`task-${taskId}.mp4`)}`,
+    );
+  }
+  await streamPersistObjectToResponse(res, videoKey);
+  return true;
+}
+
 // POST /api/download/tasks/:id/file-token - 创建一次性下载 token
 app.post('/api/download/tasks/:id/file-token', authenticate, async (req, res) => {
   try {
     const taskId = req.params.id;
     const db = getDatabase();
-    const row = db.prepare('SELECT user_id FROM tasks WHERE id = ?').get(taskId);
+    const row = db.prepare(`
+      SELECT user_id, persist_video_key, persist_video_tos_url, video_url,
+        history_id, submit_id, item_id, video_provider
+      FROM tasks WHERE id = ?
+    `).get(taskId);
     if (!row) {
       return res.status(404).json({ success: false, error: '任务不存在' });
     }
@@ -1655,17 +2271,33 @@ app.post('/api/download/tasks/:id/file-token', authenticate, async (req, res) =>
 
     const result = videoDownloader.getDownloadedVideoFileByTaskId(taskId);
 
-    if (!result.success) {
-      const statusCode = result.error === '任务不存在'
-        ? 404
-        : result.error === '任务尚未下载到服务器' || result.error.startsWith('视频文件不存在')
-          ? 400
-          : 500;
-      return res.status(statusCode).json({ error: result.error });
+    if (result.success) {
+      const token = createDownloadToken(taskId, req.user.id);
+      return res.json({ success: true, data: { token } });
     }
 
-    const token = createDownloadToken(taskId, req.user.id);
-    res.json({ success: true, data: { token } });
+    const videoKey = resolvePersistVideoKey({ ...row, id: Number(taskId) });
+    if (videoKey && isTosPersistConfigured()) {
+      const proxyVideoUrl = buildPersistVideoProxyUrl(
+        taskId,
+        req.user.id,
+        req.user.role === 'admin',
+        { disposition: 'attachment' },
+      );
+      return res.json({ success: true, data: { proxyVideoUrl } });
+    }
+
+    const playable = await resolvePlayableVideoUrl({ ...row, id: Number(taskId) });
+    if (playable) {
+      return res.json({ success: true, data: { directUrl: buildVideoProxyPath(playable) } });
+    }
+
+    const statusCode = result.error === '任务不存在'
+      ? 404
+      : result.error === '任务尚未下载到服务器' || result.error.startsWith('视频文件不存在')
+        ? 400
+        : 500;
+    return res.status(statusCode).json({ error: result.error || '暂无可下载的视频地址' });
   } catch (error) {
     const code = error.statusCode || 500;
     res.status(code).json({ success: false, error: error.message });
@@ -1691,6 +2323,9 @@ app.get('/api/download/file-by-token', async (req, res) => {
 
     const result = videoDownloader.getDownloadedVideoFileByTaskId(record.taskId);
     if (!result.success) {
+      if (await tryStreamPersistVideoForTask(res, record.taskId, { attachment: true })) {
+        return;
+      }
       const statusCode = result.error === '任务不存在'
         ? 404
         : result.error === '任务尚未下载到服务器' || result.error.startsWith('视频文件不存在')
@@ -1712,25 +2347,46 @@ app.post('/api/download/tasks/:id/stream-token', authenticate, async (req, res) 
   try {
     const taskId = req.params.id;
     const db = getDatabase();
-    const row = db.prepare('SELECT user_id FROM tasks WHERE id = ?').get(taskId);
+    const row = db.prepare(`
+      SELECT user_id, persist_video_key, persist_video_tos_url, video_url,
+        history_id, submit_id, item_id, video_provider
+      FROM tasks WHERE id = ?
+    `).get(taskId);
     if (!row) {
       return res.status(404).json({ success: false, error: '任务不存在' });
     }
     await assertDownloadTaskAccessible(req, row.user_id);
 
-    const result = videoDownloader.getDownloadedVideoFileByTaskId(taskId);
+    const local = videoDownloader.getDownloadedVideoFileByTaskId(taskId);
 
-    if (!result.success) {
-      const statusCode = result.error === '任务不存在'
-        ? 404
-        : result.error === '任务尚未下载到服务器' || result.error.startsWith('视频文件不存在')
-          ? 400
-          : 500;
-      return res.status(statusCode).json({ error: result.error });
+    if (local.success) {
+      const token = createDownloadToken(taskId, req.user.id, 'stream');
+      return res.json({ success: true, data: { token } });
     }
 
-    const token = createDownloadToken(taskId, req.user.id, 'stream');
-    res.json({ success: true, data: { token } });
+    const videoKey = resolvePersistVideoKey({ ...row, id: Number(taskId) });
+    if (videoKey && isTosPersistConfigured()) {
+      const proxyVideoUrl = buildPersistVideoProxyUrl(
+        taskId,
+        req.user.id,
+        req.user.role === 'admin',
+      );
+      return res.json({ success: true, data: { proxyVideoUrl } });
+    }
+
+    const playable = await resolvePlayableVideoUrl({ ...row, id: Number(taskId) });
+    if (playable) {
+      return res.json({ success: true, data: { streamUrl: buildVideoProxyPath(playable) } });
+    }
+
+    const errMsg = local.error || '暂无可预览的视频地址';
+    const statusCode =
+      errMsg === '任务不存在'
+        ? 404
+        : errMsg === '任务尚未下载到服务器' || errMsg.startsWith('视频文件不存在')
+          ? 400
+          : 500;
+    return res.status(statusCode).json({ error: errMsg });
   } catch (error) {
     const code = error.statusCode || 500;
     res.status(code).json({ success: false, error: error.message });
@@ -1754,6 +2410,9 @@ app.get('/api/download/stream-by-token', async (req, res) => {
 
     const result = videoDownloader.getDownloadedVideoFileByTaskId(record.taskId);
     if (!result.success) {
+      if (await tryStreamPersistVideoForTask(res, record.taskId)) {
+        return;
+      }
       const statusCode = result.error === '任务不存在'
         ? 404
         : result.error === '任务尚未下载到服务器' || result.error.startsWith('视频文件不存在')
@@ -1832,6 +2491,8 @@ app.get('/api/download/tasks', authenticate, async (req, res) => {
       pageSize: parseInt(pageSize),
       userScope,
     });
+    const isAdmin = req.user.role === 'admin';
+    result.tasks = await enrichTasksWithPersistUrls(result.tasks, req.user.id, isAdmin);
     res.json({ success: true, data: result });
   } catch (error) {
     const code = error.statusCode || 500;
@@ -1860,7 +2521,8 @@ app.post('/api/download/tasks/:id', authenticate, async (req, res) => {
 
     await assertDownloadTaskAccessible(req, task.user_id);
 
-    if (!task.video_url) {
+    const hasPersistUrl = String(task.persist_video_tos_url || '').trim().startsWith('http');
+    if (!task.video_url && !task.persist_video_key && !hasPersistUrl) {
       return res.status(400).json({ error: '视频仍在生成中，暂时无法下载' });
     }
 
@@ -2395,6 +3057,40 @@ app.get('/api/admin/modeltoo/groups', authenticate, requireAdmin, async (req, re
   }
 });
 
+// GET /api/modeltoo/projects-with-balance - 获取当前用户的 ModelToo 项目列表及余额
+app.get('/api/modeltoo/projects-with-balance', authenticate, async (req, res) => {
+  try {
+    if (!MODELTOO_API_URL) {
+      return res.status(503).json({
+        error: '未配置 MODELTOO_API_URL，请在 .env 中设置后重启服务',
+      });
+    }
+    if (!process.env.MODELTOO_INTERNAL_TOKEN) {
+      return res.status(503).json({
+        error: '未配置 MODELTOO_INTERNAL_TOKEN，请在 .env 中设置后重启服务',
+      });
+    }
+    
+    // Get current user
+    const user = req.user;
+    if (!user) {
+      return res.status(401).json({ error: '未授权' });
+    }
+
+    // Try to get ModelToo user ID by querying ModelToo's user list
+    // For now, we'll use the email as a fallback and let ModelToo handle the lookup
+    // In a production system, we should have a proper user mapping
+    const items = await getProjectsWithBalance(user.email);
+    res.json({ items });
+  } catch (error) {
+    console.error('[modeltoo] projects-with-balance error:', error);
+    res.status(503).json({
+      error: error.message || '获取 ModelToo 项目列表失败',
+      code: 'MODELTOO_UPSTREAM',
+    });
+  }
+});
+
 // ============================================================
 // 视频生成统计接口（基于本地 tasks 表；可选 group_id 过滤）
 // ============================================================
@@ -2666,20 +3362,22 @@ process.on('SIGINT', () => {
  * 场景: 服务在任务生成中途被重启, 任务在方舟服务端仍在运行,
  *       拿到 task_id (保存在 submit_id 字段) 即可继续拉回结果。
  */
-function resumePendingArkTasks() {
+function resumePendingVideoTasks() {
   try {
     const db = getDatabase();
     const pending = db.prepare(`
-      SELECT id, prompt, submit_id FROM tasks
+      SELECT id, prompt, submit_id, video_provider, mt_project_id, mt_idempotency_key, user_id FROM tasks
       WHERE status = 'generating' AND submit_id IS NOT NULL AND (video_url IS NULL OR video_url = '')
     `).all();
 
     if (pending.length === 0) return;
 
-    console.log(`[resume] 发现 ${pending.length} 个未完成的方舟任务, 尝试恢复轮询...`);
+    console.log(`[resume] 发现 ${pending.length} 个未完成的视频任务, 尝试恢复轮询...`);
 
     for (const t of pending) {
-      pollArkTaskUntilDone({
+      const provider = t.video_provider || 'ark';
+      pollVideoUntilDone({
+        provider,
         taskId: t.submit_id,
         prompt: t.prompt || '',
         onProgress: (msg) => {
@@ -2690,6 +3388,19 @@ function resumePendingArkTasks() {
           try { taskService.updateTask(t.id, { video_url: url }); } catch (_) {}
         },
       }).then((result) => {
+        const totalTokens = extractTotalTokensFromResult(result);
+        const completionTokens = extractCompletionTokensFromResult(result);
+        const resumeModelId = normalizeModelId(
+          settingsService.getSetting('model') ||
+            (provider === 'luminia' ? 'luminia-2.0' : 'doubao-seedance-2-0-260128'),
+        );
+        const taskResolution = t.resolution || settingsService.getSetting('resolution') || '720p';
+        const { cost, unitPrice, pricingUnit, provider: pricingProvider } = calculateCostFromTokens(
+          totalTokens,
+          resumeModelId,
+          { resolution: taskResolution, hasVideoInput: false },
+        );
+
         taskService.updateTaskStatus(t.id, 'done', {
           video_url: result.videoUrl,
           history_id: result.historyId || t.submit_id,
@@ -2697,8 +3408,49 @@ function resumePendingArkTasks() {
           progress: '',
           error_message: null,
           revised_prompt: result.revisedPrompt || null,
+          total_tokens: totalTokens,
+          completion_tokens: completionTokens,
+          cost: cost,
+          unit_price: unitPrice,
         });
+        schedulePersistGeneratedVideo(t.id, result.videoUrl);
         console.log(`[resume][task ${t.id}] ✅ 恢复完成: ${result.videoUrl}`);
+
+        // 结算：按实际费用扣一次（allow_negative=true）
+        if (cost !== null && cost > 0 && t.mt_project_id && t.mt_idempotency_key) {
+          (async () => {
+            try {
+              // 通过 user_id 查 email 作为扣费 user_id
+              const userRow = db.prepare('SELECT email FROM users WHERE id = ?').get(t.user_id);
+              const userEmail = userRow?.email;
+              if (!userEmail) {
+                console.warn(`[resume][task ${t.id}] 找不到用户 email，跳过结算`);
+                return;
+              }
+              const settleResult = await consumeBudget({
+                projectId: t.mt_project_id,
+                amount: cost,
+                idempotencyKey: t.mt_idempotency_key,
+                userId: userEmail,
+                actorUserId: userEmail,
+                source: 'sd',
+                metadata: {
+                  task_id: t.id,
+                  model: resumeModelId,
+                  total_tokens: totalTokens,
+                  unit_price: unitPrice,
+                  pricing_unit: pricingUnit,
+                  provider: pricingProvider,
+                  resumed: true,
+                },
+                allowNegative: true,
+              });
+              console.log(`[resume][task ${t.id}] 结算扣费成功: ${cost}, 余额: ${settleResult.balance}`);
+            } catch (settleError) {
+              console.error(`[resume][task ${t.id}] 结算扣费失败:`, settleError.message);
+            }
+          })();
+        }
       }).catch((err) => {
         taskService.updateTaskStatus(t.id, 'error', {
           progress: '',
@@ -2713,14 +3465,16 @@ function resumePendingArkTasks() {
 }
 
 app.listen(PORT, () => {
-  const maskedKey = (() => {
-    const k = process.env.ARK_API_KEY || '';
+  const maskKey = (envName) => {
+    const k = process.env[envName] || '';
     if (!k) return '未配置';
     return k.length > 6 ? `已配置 (...${k.slice(-6)})` : '已配置';
-  })();
+  };
   console.log(`\n🚀 服务器已启动: http://localhost:${PORT}`);
   console.log(`🔗 方舟官方 API : https://ark.cn-beijing.volces.com/api/v3`);
-  console.log(`🔑 ARK_API_KEY : ${maskedKey}`);
+  console.log(`🔑 ARK_API_KEY    : ${maskKey('ARK_API_KEY')}`);
+  console.log(`🔗 Luminia API    : ${process.env.LUMINIA_API_BASE_URL || 'https://luapi.hagoot.com'}`);
+  console.log(`🔑 LUMINIA_API_KEY: ${maskKey('LUMINIA_API_KEY')}`);
   const intTok = (process.env.STUDIO_INTEGRATION_TOKEN || '').trim();
   const intMail = (process.env.STUDIO_INTEGRATION_USER_EMAIL || '').trim();
   if (intTok) {
@@ -2732,12 +3486,32 @@ app.listen(PORT, () => {
   }
   console.log(`📁 运行模式    : ${process.env.NODE_ENV === 'production' ? '生产' : '开发'}\n`);
 
-  // 启动后清理已过期的 TOS 文件缓存, 并异步恢复未完成的任务
+  // 启动后清理已过期的 TOS 文件缓存；先清扫僵尸 generating，再恢复方舟轮询
   try {
     const removed = cleanupExpiredTosCache();
     if (removed > 0) console.log(`[tos-cache] 启动清理: 删除过期记录 ${removed} 条`);
   } catch (err) {
     console.warn('[tos-cache] 启动清理失败:', err.message);
   }
-  resumePendingArkTasks();
+  try {
+    const r = taskService.sweepStaleGeneratingTasks();
+    if (r.marked > 0) {
+      console.warn(`[sweep-stale-generating] 启动时已将 ${r.marked} 条超时 generating 标为 error（共检查 ${r.checked} 条）`);
+    }
+  } catch (err) {
+    console.warn('[sweep-stale-generating] 启动清扫失败:', err.message);
+  }
+  resumePendingVideoTasks();
+
+  const sweepIntervalMs = Math.max(
+    60_000,
+    Number(process.env.STALE_GENERATING_SWEEP_INTERVAL_MS || 10 * 60 * 1000) || 10 * 60 * 1000,
+  );
+  setInterval(() => {
+    try {
+      taskService.sweepStaleGeneratingTasks();
+    } catch (e) {
+      console.warn('[sweep-stale-generating] 定时清扫失败:', e.message);
+    }
+  }, sweepIntervalMs).unref();
 });

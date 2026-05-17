@@ -5,7 +5,7 @@ import Mention from '@tiptap/extension-mention';
 import type { SuggestionProps, SuggestionKeyDownProps } from '@tiptap/suggestion';
 import { Fragment, Slice, type Node as PMNode } from '@tiptap/pm/model';
 import tippy, { type Instance as TippyInstance } from 'tippy.js';
-import { useEffect, useImperativeHandle, useRef, forwardRef, useCallback } from 'react';
+import { useEffect, useImperativeHandle, useRef, forwardRef, useCallback, useMemo } from 'react';
 import { AssetMention } from './AssetMention';
 import MentionList, { type MentionListHandle } from './MentionList';
 import {
@@ -106,6 +106,7 @@ const PromptEditor = forwardRef<PromptEditorHandle, PromptEditorProps>(function 
   assetsRef.current = assets;
 
   const editor = useEditor({
+    immediatelyRender: false,
     extensions: [
       StarterKit.configure({
         heading: false,
@@ -400,35 +401,68 @@ const PromptEditor = forwardRef<PromptEditorHandle, PromptEditorProps>(function 
     lastEmittedRef.current = value;
   }, [value, editor]);
 
-  // 素材列表变化（新增/删除/重排导致 label 漂移）时，同步已插入 chip 的 label/thumb
+  const assetsStructureSig = useMemo(
+    () => assets.map((a) => `${a.kind}:${a.id}:${a.label}`).join('\n'),
+    [assets],
+  );
+  const assetsThumbSig = useMemo(
+    () => assets.map((a) => `${a.id}:${a.thumb ?? ''}`).join('|'),
+    [assets],
+  );
+
+  // 素材 label / 编号变化时同步 chip，并回写纯文本（含 @图N）
   useEffect(() => {
     if (!editor) return;
-    const byId = new Map(assets.map((a) => [a.id, a]));
+    const byId = new Map(assetsRef.current.map((a) => [a.id, a]));
     const { state } = editor;
     let tr = state.tr;
-    let changed = false;
+    let labelChanged = false;
     state.doc.descendants((node, pos) => {
       if (node.type.name !== 'assetMention') return;
       const asset = byId.get(node.attrs.assetId);
-      if (!asset) return; // 素材被删：保留旧 chip，避免破坏上下文
+      if (!asset) return;
       const nextLabel = asset.label;
       const nextThumb = asset.thumb ?? null;
-      if (node.attrs.label !== nextLabel || (node.attrs.thumb ?? null) !== nextThumb) {
+      if (node.attrs.label !== nextLabel) {
         tr = tr.setNodeMarkup(pos, undefined, {
           ...node.attrs,
           label: nextLabel,
           thumb: nextThumb,
         });
-        changed = true;
+        labelChanged = true;
       }
     });
-    if (changed) {
-      // 标记这次变更不应触发 onChange 外发（label 只影响展示+序列化文本）
+    if (labelChanged) {
       editor.view.dispatch(tr);
       lastEmittedRef.current = editor.getText({ blockSeparator: '\n' });
       onChange(lastEmittedRef.current);
     }
-  }, [assets, editor, onChange]);
+  }, [assetsStructureSig, editor, onChange]);
+
+  // 仅缩略图 URL 变化（如人像库预签名刷新）时静默更新 chip，避免打断输入
+  useEffect(() => {
+    if (!editor) return;
+    const byId = new Map(assetsRef.current.map((a) => [a.id, a]));
+    const { state } = editor;
+    let tr = state.tr;
+    let thumbChanged = false;
+    state.doc.descendants((node, pos) => {
+      if (node.type.name !== 'assetMention') return;
+      const asset = byId.get(node.attrs.assetId);
+      if (!asset) return;
+      const nextThumb = asset.thumb ?? null;
+      if ((node.attrs.thumb ?? null) !== nextThumb) {
+        tr = tr.setNodeMarkup(pos, undefined, {
+          ...node.attrs,
+          thumb: nextThumb,
+        });
+        thumbChanged = true;
+      }
+    });
+    if (thumbChanged) {
+      editor.view.dispatch(tr);
+    }
+  }, [assetsThumbSig, editor]);
 
   // 禁用状态同步
   useEffect(() => {
@@ -464,8 +498,8 @@ const PromptEditor = forwardRef<PromptEditorHandle, PromptEditorProps>(function 
   );
 
   return (
-    <div className={className} style={{ minHeight }}>
-      <EditorContent editor={editor} className="h-full" />
+    <div className={className ?? 'flex-1 w-full min-h-0'} style={{ minHeight }}>
+      <EditorContent editor={editor} className="h-full min-h-[inherit]" />
     </div>
   );
 });

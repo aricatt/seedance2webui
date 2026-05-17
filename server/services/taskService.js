@@ -21,6 +21,10 @@ const TASK_COLUMNS = [
   'history_id',
   'item_id',
   'video_url',
+  'persist_video_key',
+  'persist_cover_key',
+  'persist_video_tos_url',
+  'persist_cover_tos_url',
   'video_path',
   'download_status',
   'download_path',
@@ -34,7 +38,17 @@ const TASK_COLUMNS = [
   'revised_prompt',
   'retry_count',
   'duration',
+  'resolution',
   'archive_path',
+  'persist_archive_key',
+  'persist_archive_tos_url',
+  'total_tokens',
+  'completion_tokens',
+  'cost',
+  'unit_price',
+  'mt_project_id',
+  'mt_idempotency_key',
+  'video_provider',
 ];
 
 const TASK_UPDATE_FIELDS = new Set(TASK_COLUMNS);
@@ -71,6 +85,10 @@ function normalizeTaskData(data = {}) {
     history_id: pickFirstDefined(data.historyId, data.history_id, null),
     item_id: pickFirstDefined(data.itemId, data.item_id, null),
     video_url: pickFirstDefined(data.videoUrl, data.video_url, null),
+    persist_video_key: pickFirstDefined(data.persistVideoKey, data.persist_video_key, null),
+    persist_cover_key: pickFirstDefined(data.persistCoverKey, data.persist_cover_key, null),
+    persist_video_tos_url: pickFirstDefined(data.persistVideoTosUrl, data.persist_video_tos_url, null),
+    persist_cover_tos_url: pickFirstDefined(data.persistCoverTosUrl, data.persist_cover_tos_url, null),
     video_path: pickFirstDefined(data.videoPath, data.video_path, null),
     download_status: pickFirstDefined(data.downloadStatus, data.download_status, 'pending'),
     download_path: pickFirstDefined(data.downloadPath, data.download_path, null),
@@ -83,6 +101,19 @@ function normalizeTaskData(data = {}) {
     error_message: pickFirstDefined(data.errorMessage, data.error_message, null),
     retry_count: Number(pickFirstDefined(data.retryCount, data.retry_count, 0) || 0),
     duration: pickFirstDefined(data.duration, null) != null ? Number(pickFirstDefined(data.duration, null)) : null,
+    resolution: (() => {
+      const v = pickFirstDefined(data.resolution, null);
+      if (v === undefined || v === null) return null;
+      const s = String(v).trim();
+      return s === '' ? null : s;
+    })(),
+    total_tokens: pickFirstDefined(data.totalTokens, data.total_tokens, null),
+    completion_tokens: pickFirstDefined(data.completionTokens, data.completion_tokens, null),
+    cost: pickFirstDefined(data.cost, null),
+    unit_price: pickFirstDefined(data.unitPrice, data.unit_price, null),
+    mt_project_id: pickFirstDefined(data.mtProjectId, data.mt_project_id, null),
+    mt_idempotency_key: pickFirstDefined(data.mtIdempotencyKey, data.mt_idempotency_key, null),
+    video_provider: pickFirstDefined(data.videoProvider, data.video_provider, null),
   };
 }
 
@@ -121,6 +152,24 @@ function normalizeUpdateFields(updates = {}) {
       case 'videoUrl':
         normalized.video_url = value;
         break;
+      case 'persistVideoKey':
+        normalized.persist_video_key = value;
+        break;
+      case 'persistCoverKey':
+        normalized.persist_cover_key = value;
+        break;
+      case 'persistVideoTosUrl':
+        normalized.persist_video_tos_url = value;
+        break;
+      case 'persistCoverTosUrl':
+        normalized.persist_cover_tos_url = value;
+        break;
+      case 'persistArchiveKey':
+        normalized.persist_archive_key = value;
+        break;
+      case 'persistArchiveTosUrl':
+        normalized.persist_archive_tos_url = value;
+        break;
       case 'videoPath':
         normalized.video_path = value;
         break;
@@ -145,11 +194,29 @@ function normalizeUpdateFields(updates = {}) {
       case 'retryCount':
         normalized.retry_count = value;
         break;
+      case 'resolution':
+        normalized.resolution = value;
+        break;
       case 'startedAt':
         normalized.started_at = value;
         break;
       case 'completedAt':
         normalized.completed_at = value;
+        break;
+      case 'totalTokens':
+        normalized.total_tokens = value;
+        break;
+      case 'completionTokens':
+        normalized.completion_tokens = value;
+        break;
+      case 'cost':
+        normalized.cost = value;
+        break;
+      case 'unitPrice':
+        normalized.unit_price = value;
+        break;
+      case 'videoProvider':
+        normalized.video_provider = value;
         break;
       default:
         normalized[key] = value;
@@ -224,6 +291,7 @@ function expandDraftTaskWithDb(db, draftTaskId, options = {}) {
       status: 'pending',
       download_status: 'pending',
       account_info: draftTask.account_info,
+      resolution: draftTask.resolution || null,
     });
 
     cloneTaskAssetsWithDb(db, draftTask.id, outputTask.id);
@@ -518,6 +586,79 @@ export function getTasksByStatus(projectId, status) {
   return stmt.all(projectId, status);
 }
 
+/**
+ * 将长时间卡在 generating、且仍无成品视频的任务标为 error，避免下载页「监听」永久悬挂。
+ *
+ * 规则（可用环境变量微调，单位：分钟）：
+ * - 尚无 submit_id：默认 50 分钟内必须出现方舟任务号，否则视为素材处理/提交链路已死。
+ * - 已有 submit_id：默认 100 分钟内必须有进展（updated_at），否则视为轮询/进程异常；
+ *   需大于方舟侧轮询上限（约 60 分钟），减少误杀。
+ *
+ * @returns {{ checked: number, marked: number }}
+ */
+export function sweepStaleGeneratingTasks() {
+  const noSubmitMin = Math.max(
+    5,
+    Number(process.env.STALE_GENERATING_NO_SUBMIT_MINUTES || 50) || 50,
+  );
+  const withSubmitMin = Math.max(
+    noSubmitMin + 1,
+    Number(process.env.STALE_GENERATING_WITH_SUBMIT_MINUTES || 100) || 100,
+  );
+  const noSubmitMs = noSubmitMin * 60 * 1000;
+  const withSubmitMs = withSubmitMin * 60 * 1000;
+
+  const db = getDatabase();
+  const rows = db
+    .prepare(
+      `
+    SELECT id, submit_id, updated_at, created_at
+    FROM tasks
+    WHERE task_kind = 'output'
+      AND status = 'generating'
+      AND (video_url IS NULL OR TRIM(COALESCE(video_url, '')) = '')
+  `,
+    )
+    .all();
+
+  const now = Date.now();
+  let marked = 0;
+
+  for (const row of rows) {
+    const ref = row.updated_at || row.created_at;
+    const t = new Date(ref).getTime();
+    if (Number.isNaN(t)) continue;
+
+    const ageMs = now - t;
+    const hasSubmit = row.submit_id != null && String(row.submit_id).trim() !== '';
+    const thresholdMs = hasSubmit ? withSubmitMs : noSubmitMs;
+    if (ageMs < thresholdMs) continue;
+
+    const msg = hasSubmit
+      ? `服务端兜底：生成长时间无进展（>${withSubmitMin} 分钟无更新），已自动终止。请重试或联系管理员。`
+      : `服务端兜底：长时间未取得方舟任务号（>${noSubmitMin} 分钟），已自动终止。请重试。`;
+
+    try {
+      updateTaskStatus(row.id, 'error', {
+        progress: '',
+        error_message: msg,
+      });
+      marked += 1;
+      console.warn(
+        `[sweep-stale-generating] task ${row.id} → error (${hasSubmit ? `stale ${withSubmitMin}m` : `no submit_id ${noSubmitMin}m`})`,
+      );
+    } catch (e) {
+      console.warn(`[sweep-stale-generating] task ${row.id} 更新失败:`, e.message);
+    }
+  }
+
+  if (marked > 0) {
+    console.warn(`[sweep-stale-generating] 本次标记 ${marked} / ${rows.length} 个僵尸 generating 任务为 error`);
+  }
+
+  return { checked: rows.length, marked };
+}
+
 export default {
   getTaskById,
   createTask,
@@ -537,4 +678,5 @@ export default {
   expandDraftTasksToOutputTasks,
   getPendingTasks,
   getTasksByStatus,
+  sweepStaleGeneratingTasks,
 };

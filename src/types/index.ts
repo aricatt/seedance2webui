@@ -17,12 +17,14 @@ export type Duration = 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15;
 export type Resolution = '480p' | '720p' | '1080p';
 
 /**
- * 方舟官方视频生成模型 ID
- * 参考: https://www.volcengine.com/docs/82379
+ * 视频生成模型 ID（火山方舟 + Luminia Seedance 2.0）
  */
 export type ModelId =
-  | 'doubao-seedance-2-0-260128'       // Seedance 2.0 (完整版)
-  | 'doubao-seedance-2-0-fast-260128'; // Seedance 2.0 Fast (更快但画质略低)
+  | 'luminia-2.0'
+  | 'luminia-2.0-fast'
+  | 'doubao-seedance-2-0-260128'
+  | 'doubao-seedance-2-0-fast-260128'
+  | (string & {});
 
 // ============================================================
 // 用户认证类型
@@ -61,6 +63,10 @@ export interface ModelOption {
   value: ModelId;
   label: string;
   description: string;
+  provider?: 'ark' | 'luminia';
+  paramProfile?: string;
+  resolutions?: Resolution[];
+  supports1080p?: boolean;
 }
 
 export interface AppViewOption {
@@ -99,14 +105,14 @@ export interface GenerateVideoRequest {
   resolution?: Resolution;
   /** 种子值（整数）；留空由模型随机 */
   seed?: number;
-  /** 是否固定镜头（不运镜）；默认 false */
-  cameraFixed?: boolean;
   /** 是否添加水印；默认 false */
   watermark?: boolean;
   /** 是否生成有声视频（仅在无参考音频时生效）；默认 true */
   generateAudio?: boolean;
   /** 参考图片, 官方允许 1~9 张 */
   files: File[];
+  /** 虚拟人像库 id（仅 Luminia，与 files 合并计数，库图在前） */
+  portraitIds?: number[];
   /** 参考视频, 官方允许 0~3 段, 总时长 <= 15s */
   videoFiles?: File[];
   /** 参考音频, 官方允许 0~3 段, 总时长 <= 15s */
@@ -155,16 +161,35 @@ export const RESOLUTION_OPTIONS: Resolution[] = ['480p', '720p', '1080p'];
 
 
 
+/** 离线兜底（在线列表以 GET /api/models 为准） */
 export const MODEL_OPTIONS: ModelOption[] = [
   {
+    value: 'luminia-2.0',
+    label: 'Seedance 2.0 (Luminia)',
+    description: 'Luminia 高品质 Seedance 2.0',
+    provider: 'luminia',
+    resolutions: ['480p', '720p'],
+  },
+  {
+    value: 'luminia-2.0-fast',
+    label: 'Seedance 2.0 Fast (Luminia)',
+    description: 'Luminia 快速版',
+    provider: 'luminia',
+    resolutions: ['480p', '720p'],
+  },
+  {
     value: 'doubao-seedance-2-0-260128',
-    label: 'Seedance 2.0',
-    description: '火山方舟官方 Seedance 2.0, 默认画质最好, 支持图生视频与音视频一体化',
+    label: 'Seedance 2.0 (火山方舟)',
+    description: '火山方舟官方 Seedance 2.0',
+    provider: 'ark',
+    resolutions: ['480p', '720p'],
   },
   {
     value: 'doubao-seedance-2-0-fast-260128',
-    label: 'Seedance 2.0 Fast',
-    description: '更快的推理速度, 适合批量快速出稿, 画面细节略低于完整版',
+    label: 'Seedance 2.0 Fast (火山方舟)',
+    description: '火山方舟快速版',
+    provider: 'ark',
+    resolutions: ['480p', '720p'],
   },
 ];
 
@@ -219,6 +244,15 @@ export interface Task {
   history_id?: string | null;
   item_id?: string | null;
   video_url?: string | null;
+  /** TOS_PERSIST_BUCKET 内对象 key */
+  persist_video_key?: string | null;
+  persist_cover_key?: string | null;
+  /** 持久化完成时的 canonical 对象 URL（无签名，形如 https://{bucket}.{endpoint}/{key}） */
+  persist_video_tos_url?: string | null;
+  persist_cover_tos_url?: string | null;
+  /** 列表/详情接口按需生成的 GET 预签名 URL */
+  persist_video_display_url?: string | null;
+  persist_cover_display_url?: string | null;
   video_path?: string | null;
   download_status?: DownloadStatus | null;
   download_path?: string | null;
@@ -353,6 +387,8 @@ export interface Settings {
   max_concurrent?: string;
   min_interval?: string;
   max_interval?: string;
+  provider_ark_enabled?: string;
+  provider_luminia_enabled?: string;
 }
 
 /**
@@ -415,6 +451,13 @@ export interface DownloadTask {
   status: TaskStatus;
   download_status: DownloadStatus;
   video_url?: string;
+  persist_video_key?: string | null;
+  persist_cover_key?: string | null;
+  persist_video_tos_url?: string | null;
+  persist_cover_tos_url?: string | null;
+  persist_video_display_url?: string | null;
+  persist_cover_display_url?: string | null;
+  legacy_video_thumb_url?: string | null;
   video_path?: string;
   download_path?: string;
   downloaded_at?: string;
@@ -429,12 +472,24 @@ export interface DownloadTask {
   hasHistory: boolean;
   model_type: 'image' | 'video';
   duration?: number;
+  /** 生成所用输出分辨率（如 480p / 720p / 1080p）；旧任务可能为空 */
+  resolution?: string | null;
   effective_download_status: DownloadStatus;
   archive_path?: string | null;
+  persist_archive_key?: string | null;
+  persist_archive_tos_url?: string | null;
   /** 失败原因（生成失败时由后端写入） */
   error_message?: string | null;
   /** 方舟模型改写后的提示词（成功时由后端写入） */
   revised_prompt?: string | null;
+  /** 总消耗 token 数量（单位：token） */
+  total_tokens?: number | null;
+  /** 完成 token 数量（单位：token） */
+  completion_tokens?: number | null;
+  /** 费用（单位：元） */
+  cost?: number | null;
+  /** 单价（单位：元/百万token） */
+  unit_price?: number | null;
 }
 
 /**

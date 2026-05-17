@@ -1,11 +1,38 @@
 import type { GenerateVideoRequest, VideoGenerationResponse } from '../types';
 import { getAuthHeaders } from './authService';
 
+/** 提交接口偶发空 body 时避免 json() 抛错 */
+async function parseSubmitResponseBody(response: Response): Promise<Record<string, unknown>> {
+  const text = await response.text();
+  const trimmed = text.trim();
+  if (!trimmed) return {};
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function submitFailureMessage(status: number, data: Record<string, unknown>): string {
+  const serverMsg =
+    (typeof data.message === 'string' && data.message.trim()) ||
+    (typeof data.error === 'string' && data.error.trim()) ||
+    '';
+
+  if (status === 402) {
+    return serverMsg ? `未加入项目/积分不足。（${serverMsg}）` : '未加入项目/积分不足。';
+  }
+
+  return serverMsg || `提交失败 (HTTP ${status})`;
+}
+
 export async function generateVideo(
   request: GenerateVideoRequest,
   onProgress?: (message: string) => void,
   /** 提交成功后立即回调，用于触发客户端归档等副作用 */
   onTaskSubmitted?: (ids: { taskId: string; dbTaskId?: number }) => void,
+  projectId?: string,
+  estimatedPrice?: number,
 ): Promise<VideoGenerationResponse> {
   const formData = new FormData();
   formData.append('prompt', request.prompt);
@@ -15,9 +42,6 @@ export async function generateVideo(
   if (request.resolution) formData.append('resolution', request.resolution);
   if (typeof request.seed === 'number' && Number.isFinite(request.seed)) {
     formData.append('seed', String(request.seed));
-  }
-  if (typeof request.cameraFixed === 'boolean') {
-    formData.append('camera_fixed', String(request.cameraFixed));
   }
   if (typeof request.watermark === 'boolean') {
     formData.append('watermark', String(request.watermark));
@@ -35,18 +59,29 @@ export async function generateVideo(
   for (const a of request.audioFiles || []) {
     formData.append('audio', a);
   }
+  if (request.portraitIds?.length) {
+    formData.append('portrait_ids', JSON.stringify(request.portraitIds));
+  }
 
   // 第1步: 提交任务
   onProgress?.('正在提交视频生成请求...');
+  const headers = getAuthHeaders();
+  if (projectId) {
+    headers['X-Project-Id'] = projectId;
+  }
+  if (estimatedPrice !== undefined) {
+    headers['X-Estimated-Price'] = String(estimatedPrice);
+  }
+  
   const submitRes = await fetch('/api/generate-video', {
     method: 'POST',
-    headers: getAuthHeaders(),
+    headers,
     body: formData,
   });
 
-  const submitData = await submitRes.json();
+  const submitData = await parseSubmitResponseBody(submitRes);
   if (!submitRes.ok) {
-    throw new Error(submitData.error || `提交失败 (HTTP ${submitRes.status})`);
+    throw new Error(submitFailureMessage(submitRes.status, submitData));
   }
 
   const { taskId, dbTaskId } = submitData as { taskId?: string; dbTaskId?: number };

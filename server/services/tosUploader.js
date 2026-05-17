@@ -16,7 +16,9 @@
 import { TosClient } from '@volcengine/tos-sdk';
 import crypto from 'crypto';
 import path from 'path';
-import { readFileSync, statSync } from 'fs';
+import { URL } from 'url';
+import { readFileSync, createReadStream } from 'fs';
+import { createHash } from 'crypto';
 import { getDatabase } from '../database/index.js';
 
 // ============================================================
@@ -92,6 +94,16 @@ export function guessMimeType(filename, fallback = 'application/octet-stream') {
 
 /** 预签名 URL 有效期 (秒). 设为 1 小时, 方舟下载绰绰有余. */
 const PRESIGN_EXPIRY_SEC = 3600;
+
+/** 持久桶对象 GET 预签名默认有效期（下载 / 预览按需刷新） */
+function persistPresignExpirySec() {
+  const n = parseInt(process.env.TOS_PERSIST_PRESIGN_EXPIRY_SEC || '86400', 10);
+  return Number.isFinite(n) && n > 60 ? n : 86400;
+}
+
+export function persistKeyPrefix() {
+  return (process.env.TOS_PERSIST_KEY_PREFIX || 'seedance-results').replace(/^\/+|\/+$/g, '');
+}
 
 /** 本地缓存的安全边际: URL 即将过期前 10 分钟就当过期 */
 const CACHE_SAFETY_MARGIN_SEC = 600;
@@ -324,6 +336,219 @@ export function isTosPersistConfigured() {
   return isTosConfigured() && !!getTosPersistBucket();
 }
 
+/**
+ * 计算本地文件 SHA-256（hex）
+ */
+export async function sha256File(filePath) {
+  const hash = createHash('sha256');
+  await new Promise((resolve, reject) => {
+    const rs = createReadStream(filePath);
+    rs.on('data', (chunk) => hash.update(chunk));
+    rs.on('error', reject);
+    rs.on('end', resolve);
+  });
+  return hash.digest('hex');
+}
+
+/**
+ * 上传本地文件到 TOS_PERSIST_BUCKET，返回对象 key（不含 bucket）
+ */
+/**
+ * 上传 Buffer 到 TOS_PERSIST_BUCKET（人像库等需长期保留的素材）
+ * @param {Buffer} buffer
+ * @param {object} [opts]
+ * @param {string} [opts.filename]
+ * @param {string} [opts.mimeType]
+ * @param {string} [opts.keyPrefix] 对象 key 前缀（不含首尾斜杠），默认 persistKeyPrefix()
+ */
+export async function uploadBufferToPersistBucket(buffer, { filename, mimeType, keyPrefix } = {}) {
+  const bucket = getTosPersistBucket();
+  if (!bucket) {
+    throw new Error('TOS_PERSIST_BUCKET 未配置');
+  }
+  const client = getTosClient();
+  const hash = sha256Hex(buffer);
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const baseName = filename || 'upload.bin';
+  const ext = path.extname(baseName) || '';
+  let stem = path.basename(baseName, ext).replace(/[/\\]/g, '_');
+  if (stem.length > 40) stem = stem.slice(0, 40);
+  const prefix = (keyPrefix || persistKeyPrefix()).replace(/^\/+|\/+$/g, '');
+  const key = `${prefix}/${day}/${hash.slice(0, 12)}-${stem}${ext}`;
+  const mime = mimeType || guessMimeType(baseName);
+
+  await client.putObject({
+    bucket,
+    key,
+    body: buffer,
+    contentType: mime,
+  });
+
+  console.log(`[tos-persist] put_object buffer bucket=${bucket} key=${key}`);
+  return { key, bucket };
+}
+
+export async function uploadFileToPersistBucket(localPath, { filename } = {}) {
+  const bucket = getTosPersistBucket();
+  if (!bucket) {
+    throw new Error('TOS_PERSIST_BUCKET 未配置');
+  }
+  const client = getTosClient();
+  const hash = await sha256File(localPath);
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const baseName = filename || path.basename(localPath);
+  const ext = path.extname(baseName) || path.extname(localPath) || '';
+  let stem = path.basename(baseName, ext).replace(/[/\\]/g, '_');
+  if (stem.length > 40) stem = stem.slice(0, 40);
+  const key = `${persistKeyPrefix()}/${day}/${hash.slice(0, 12)}-${stem}${ext}`;
+  const mime = guessMimeType(baseName || localPath);
+
+  await client.putObjectFromFile({
+    bucket,
+    key,
+    filePath: localPath,
+    contentType: mime,
+  });
+
+  console.log(`[tos-persist] put_object bucket=${bucket} key=${key}`);
+  return { key, bucket };
+}
+
+/**
+ * 持久桶对象的 canonical HTTPS 地址（无查询签名）。
+ * 私有桶不可直接在浏览器/anonymous GET；访问时应用 persist_*_key 按需预签名，或由持有 AK/SK 的系统自行签名/SDK GetObject。
+ *
+ * 默认虚拟主机风格：https://{bucket}.{TOS_ENDPOINT}/{key}
+ * 若与控制台不一致可设 TOS_PERSIST_CANONICAL_HOST=yun-lib.tos-cn-guangzhou.volces.com（不含协议）
+ */
+export function buildCanonicalPersistObjectUrl(objectKey) {
+  const bucket = getTosPersistBucket();
+  if (!bucket || !objectKey) return null;
+  const key = String(objectKey).replace(/^\/+/, '');
+  const overrideHost = (process.env.TOS_PERSIST_CANONICAL_HOST || '')
+    .trim()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '');
+  if (overrideHost) {
+    return `https://${overrideHost}/${key}`;
+  }
+  const cfg = getTosCacheConfig();
+  const endpoint = cfg.endpoint.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  return `https://${bucket}.${endpoint}/${key}`;
+}
+
+/** 列表缩略图 x-tos-process（与前端 download 列表 96px 对齐） */
+export const DOWNLOAD_LIST_X_TOS_PROCESS = 'image/resize,w_96,h_96,limit_0/format,webp';
+
+/** 人像库列表缩略图（64px 格子，略放大以适配高清屏） */
+export const PORTRAIT_LIST_X_TOS_PROCESS = 'image/resize,w_128,h_128,limit_0/format,webp';
+
+export function hasSigningQueryParams(url) {
+  const qMark = String(url || '').indexOf('?');
+  if (qMark < 0) return false;
+  const q = url.slice(qMark + 1).toLowerCase();
+  return (
+    q.includes('x-tos-signature')
+    || q.includes('x-tos-algorithm')
+    || q.includes('x-tos-credential')
+    || q.includes('x-amz-signature')
+    || q.includes('x-amz-credential')
+    || q.includes('signature=')
+  );
+}
+
+/**
+ * 从持久桶 URL（含已过期预签名或 canonical）解析 object key。
+ * 仅当 host 与当前桶虚拟域名 / path-style / TOS_PERSIST_CANONICAL_HOST 一致时返回。
+ */
+export function inferPersistObjectKeyFromUrl(url) {
+  const bucket = getTosPersistBucket();
+  if (!bucket || !String(url || '').trim()) return null;
+
+  const cfg = getTosCacheConfig();
+  const endpoint = cfg.endpoint.replace(/^https?:\/\//, '').trim().toLowerCase().replace(/\/+$/, '');
+  const canon = (process.env.TOS_PERSIST_CANONICAL_HOST || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .split('/')[0]
+    .replace(/\/+$/, '');
+
+  let parsed;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    return null;
+  }
+
+  let host = (parsed.hostname || '').toLowerCase();
+  if (host.includes(':')) host = host.split(':')[0];
+  const objectPath = decodeURIComponent((parsed.pathname || '').replace(/^\/+/, ''));
+  if (!objectPath) return null;
+
+  if (host === `${bucket.toLowerCase()}.${endpoint}`) return objectPath;
+  if (canon && host === canon) return objectPath;
+
+  if (host === endpoint) {
+    const parts = objectPath.split('/');
+    if (parts.length >= 2 && parts[0] === bucket) {
+      return parts.slice(1).join('/');
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 为持久桶对象生成 GET 预签名 URL
+ * @param {Record<string, string>} [query] 例如列表缩略图 { 'x-tos-process': '...' }
+ */
+/** 写入持久桶（固定 object key，用于任务归档等） */
+export async function putPersistObject({ key, body, contentType = 'application/octet-stream' }) {
+  const bucket = getTosPersistBucket();
+  if (!bucket || !key) {
+    throw new Error('持久桶或 objectKey 无效');
+  }
+  const client = getTosClient();
+  await client.putObject({
+    bucket,
+    key: String(key).replace(/^\/+/, ''),
+    body,
+    contentType,
+  });
+}
+
+/** 从持久桶读取对象（返回 getObjectV2 结果，content 可 pipe） */
+export async function getPersistObjectV2(key) {
+  const bucket = getTosPersistBucket();
+  if (!bucket || !key) {
+    throw new Error('持久桶或 objectKey 无效');
+  }
+  const client = getTosClient();
+  return client.getObjectV2({
+    bucket,
+    key: String(key).replace(/^\/+/, ''),
+  });
+}
+
+export async function getPresignedUrlForPersistKey(objectKey, expirySec, query = null) {
+  const bucket = getTosPersistBucket();
+  if (!bucket || !objectKey) {
+    throw new Error('持久桶或 objectKey 无效');
+  }
+  const client = getTosClient();
+  const expires = expirySec ?? persistPresignExpirySec();
+  const input = {
+    bucket,
+    key: objectKey,
+    expires,
+  };
+  if (query && typeof query === 'object' && Object.keys(query).length > 0) {
+    input.query = query;
+  }
+  return client.getPreSignedUrl(input);
+}
+
 export default {
   getOrUploadToTos,
   getOrUploadToTosByPath,
@@ -333,4 +558,12 @@ export default {
   getTosPersistBucket,
   guessMimeType,
   sha256Hex,
+  sha256File,
+  uploadBufferToPersistBucket,
+  uploadFileToPersistBucket,
+  buildCanonicalPersistObjectUrl,
+  getPresignedUrlForPersistKey,
+  inferPersistObjectKeyFromUrl,
+  hasSigningQueryParams,
+  DOWNLOAD_LIST_X_TOS_PROCESS,
 };

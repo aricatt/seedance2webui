@@ -23,7 +23,7 @@ export async function updateSettings(
 ): Promise<Settings> {
   const response = await fetch(`${API_BASE}/settings`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
     body: JSON.stringify(settings),
   });
   const result: ApiResponse<Settings> = await response.json();
@@ -47,8 +47,20 @@ export async function getArkStatus(): Promise<{ configured: boolean }> {
   return result.data!;
 }
 
+export async function getLuminiaStatus(): Promise<{ configured: boolean }> {
+  const response = await fetch(`${API_BASE}/settings/luminia-status`, {
+    headers: getAuthHeaders(),
+  });
+  const result: ApiResponse<{ configured: boolean }> = await response.json();
+  if (!result.success) {
+    throw new Error(result.error || '获取 Luminia 配置状态失败');
+  }
+  return result.data!;
+}
+
 export default {
   getSettings,
   updateSettings,
   getArkStatus,
+  getLuminiaStatus,
 };

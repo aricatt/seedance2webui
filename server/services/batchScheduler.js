@@ -8,10 +8,12 @@ import { getDatabase } from '../database/index.js';
 import * as settingsService from './settingsService.js';
 import * as taskService from './taskService.js';
 import * as projectService from './projectService.js';
-import { generateArkVideo, bufferToDataUri } from './arkVideoGenerator.js';
+import { bufferToDataUri } from './arkVideoGenerator.js';
+import { generateVideo, resolveProvider } from './videoProviderService.js';
 import { getOrUploadToTosByPath } from './tosUploader.js';
 import { guessMimeType } from './arkFileUploader.js';
 import * as videoDownloader from './videoDownloader.js';
+import { schedulePersistGeneratedVideo } from './videoPersistPipeline.js';
 
 // ============================================================
 // 工具函数
@@ -256,6 +258,7 @@ class BatchScheduler {
         error_message: null,
         revised_prompt: result.revisedPrompt || null,
       });
+      schedulePersistGeneratedVideo(taskId, result.videoUrl);
 
       this._mergeTaskSnapshot(taskId, {
         status: 'done',
@@ -315,6 +318,13 @@ class BatchScheduler {
     const audioAssets = assets.filter((a) => a.asset_type === 'audio');
     const settings = settingsService.getAllSettings();
 
+    const outputResolution =
+      settings.resolution != null && String(settings.resolution).trim() !== ''
+        ? String(settings.resolution).trim()
+        : null;
+
+    await taskService.updateTask(task.id, { resolution: outputResolution });
+
     if (imageAssets.length === 0 && videoAssets.length === 0 && audioAssets.length === 0 && !(task.prompt || '').trim()) {
       throw new Error('任务没有可用素材或 Prompt');
     }
@@ -361,14 +371,18 @@ class BatchScheduler {
 
     if (checkCancelled && checkCancelled()) throw new Error('任务已取消');
 
-    const arkResult = await generateArkVideo({
-      model: settings.model || 'doubao-seedance-2-0-260128',
+    const modelId = settings.model || 'luminia-2.0';
+    const videoProvider = resolveProvider(modelId);
+
+    const arkResult = await generateVideo({
+      model: modelId,
       prompt: task.prompt,
       imageUrls,
       videoUrls,
       audioUrls,
       ratio: settings.ratio || '16:9',
       duration: parseInt(settings.duration, 10) || 5,
+      resolution: outputResolution || undefined,
       generateAudio: true,
       watermark: false,
       onProgress: async (progress) => {
@@ -380,6 +394,7 @@ class BatchScheduler {
         await taskService.updateTask(task.id, {
           submit_id: submitId,
           submitted_at: new Date().toISOString(),
+          video_provider: videoProvider,
         });
         this._mergeTaskSnapshot(task.id, { submitId });
       },

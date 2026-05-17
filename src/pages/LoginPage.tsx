@@ -10,7 +10,7 @@ interface LoginFormData {
 }
 
 interface LoginPageProps {
-  onLoginSuccess: (user: User) => void;
+  onLoginSuccess: (user: User) => void | Promise<void>;
 }
 
 export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
@@ -30,7 +30,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
 
     try {
       const result = await login(formData);
-      onLoginSuccess(result.user);
+      await onLoginSuccess(result.user);
       navigate('/');
     } catch (err) {
       setError(err instanceof Error ? err.message : '登录失败，请检查账号和密码');

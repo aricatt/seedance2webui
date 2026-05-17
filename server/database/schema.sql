@@ -110,6 +110,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   history_id TEXT, -- 兼容字段, 方舟体系中与 submit_id 同值 (都是 task id)
   item_id TEXT,
   video_url TEXT,
+  persist_video_key TEXT, -- TOS_PERSIST_BUCKET 内视频对象 key
+  persist_cover_key TEXT, -- TOS_PERSIST_BUCKET 内封面 key
+  persist_video_tos_url TEXT, -- canonical 对象 HTTPS URL（无签名）；访问时用 key + AK/SK 按需预签名
+  persist_cover_tos_url TEXT, -- 同上
   video_path TEXT, -- 本地保存路径
   download_status TEXT DEFAULT 'pending', -- pending, downloading, done, failed
   download_path TEXT, -- 下载完成路径
@@ -124,6 +128,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   error_message TEXT,
   revised_prompt TEXT, -- 方舟模型改写后的提示词（content.revised_prompt）
   retry_count INTEGER DEFAULT 0,
+  total_tokens INTEGER DEFAULT NULL, -- 总消耗 token 数量
+  completion_tokens INTEGER DEFAULT NULL, -- 完成 token 数量
+  cost REAL DEFAULT NULL, -- 费用（元）
+  unit_price REAL DEFAULT NULL, -- 单价（元/百万token）
+  estimated_cost REAL DEFAULT NULL, -- 预扣费用（元，用于任务完成后退回差额）
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
   FOREIGN KEY (source_task_id) REFERENCES tasks(id) ON DELETE SET NULL
 );
@@ -214,9 +223,12 @@ CREATE INDEX IF NOT EXISTS idx_batches_status ON batches(status);
 
 -- 初始化默认设置
 INSERT OR IGNORE INTO settings (key, value) VALUES
-  ('model', 'doubao-seedance-2-0-260128'),
+  ('model', 'luminia-2.0'),
+  ('provider_ark_enabled', '1'),
+  ('provider_luminia_enabled', '1'),
   ('ratio', '16:9'),
   ('duration', '5'),
+  ('resolution', '720p'),
   ('download_path', ''),
   ('max_concurrent', '5'),
   ('min_interval', '30000'),

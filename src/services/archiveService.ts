@@ -9,7 +9,8 @@
  * - 图片/视频首帧压缩为 320px 边长的 JPEG（quality 0.75）
  * - 音频只记录文件名，不内嵌
  * - 提示词里的 @图N / @视频N / @音频N 渲染成和素材条一致的 chip
- * - 单文件 HTML 自包含，离线可看，无网络依赖
+ * - 单文件 HTML 自包含，离线可看，无网络依赖（缩略图为 JPEG base64 data URL）
+ * - 人像库参考图无本地 File，经 /api/portraits/:id/archive-thumb（Bearer）拉取后内嵌；列表预览走 /preview ticket 代理
  */
 import { getAuthHeaders } from './authService';
 
@@ -34,17 +35,30 @@ export interface ArchiveAudioInput {
   bytes?: number;
 }
 
+/** 虚拟人像库（生成时走 asset://，归档从 TOS 持久桶取预览图） */
+export interface ArchivePortraitInput {
+  portraitId: number;
+  mtProjectId: string;
+  label: string; // 与提示词 @图N 一致，通常 图1、图2…
+  originalName: string;
+}
+
 export interface ArchiveMeta {
   taskId: number;
   submittedAt: string;
   model: string;
   ratio: string;
   duration: number;
+  /** 用户选择的输出分辨率（如 720p）；与提交请求一致 */
+  resolution?: string;
 }
 
 export interface BuildArchiveInput {
   prompt: string;
+  /** 本地上传的参考图 */
   images: ArchiveImageInput[];
+  /** 人像库参考图（排在 images 之前，label 与 @图N 对齐） */
+  portraits?: ArchivePortraitInput[];
   videos: ArchiveVideoInput[];
   audios: ArchiveAudioInput[];
   meta: ArchiveMeta;
@@ -60,6 +74,30 @@ function fitSize(w: number, h: number, max: number): { w: number; h: number } {
   if (w <= max && h <= max) return { w, h };
   if (w >= h) return { w: max, h: Math.round((h / w) * max) };
   return { w: Math.round((w / h) * max), h: max };
+}
+
+/** 从服务端人像归档缩略图接口获取 JPEG 并转为 data URL */
+export async function fetchPortraitArchiveThumbDataUrl(
+  portraitId: number,
+  mtProjectId: string,
+): Promise<string> {
+  const qs = new URLSearchParams({ mt_project_id: mtProjectId });
+  const res = await fetch(`/api/portraits/${portraitId}/archive-thumb?${qs}`, {
+    headers: {
+      ...getAuthHeaders(),
+      'X-Project-Id': mtProjectId,
+    },
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { error?: string }).error || `HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const file = new File([blob], `portrait-${portraitId}.jpg`, {
+    type: blob.type || 'image/jpeg',
+  });
+  return compressImageToDataUrl(file);
 }
 
 /** 用 canvas 压缩图片到 dataURL (JPEG) */
@@ -253,6 +291,7 @@ function renderMeta(meta: ArchiveMeta): string {
       ${row('提交时间', toLocalReadable(meta.submittedAt))}
       ${row('模型', meta.model)}
       ${row('画幅比例', meta.ratio)}
+      ${row('分辨率', meta.resolution?.trim() ? meta.resolution : '（默认）')}
       ${row('时长（秒）', String(meta.duration))}
     </table>`;
 }
@@ -405,6 +444,20 @@ footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #2a2f3e; fon
  */
 export async function archiveTask(input: BuildArchiveInput): Promise<void> {
   try {
+    const portraitPromises = (input.portraits || []).map(async (it) => {
+      const thumb = await fetchPortraitArchiveThumbDataUrl(it.portraitId, it.mtProjectId).catch((e) => {
+        console.warn('[archive] 人像库缩略图失败', it.label, e);
+        return undefined;
+      });
+      return {
+        kind: 'image' as const,
+        label: it.label,
+        originalName: it.originalName,
+        thumbDataUrl: thumb,
+        extra: '人像库',
+      };
+    });
+
     // 1) 并行压缩所有图片、视频首帧
     const imagePromises = input.images.map(async (it) => {
       const thumb = await compressImageToDataUrl(it.file).catch((e) => {
@@ -439,11 +492,12 @@ export async function archiveTask(input: BuildArchiveInput): Promise<void> {
       extra: formatBytes(it.bytes),
     }));
 
-    const [images, videos] = await Promise.all([
+    const [portraits, images, videos] = await Promise.all([
+      Promise.all(portraitPromises),
       Promise.all(imagePromises),
       Promise.all(videoPromises),
     ]);
-    const compressed: CompressedEntry[] = [...images, ...videos, ...audioEntries];
+    const compressed: CompressedEntry[] = [...portraits, ...images, ...videos, ...audioEntries];
 
     // 2) 组装 HTML
     const html = buildArchiveHTML(input, compressed);

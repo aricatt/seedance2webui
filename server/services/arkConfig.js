@@ -20,9 +20,14 @@ export function getArkApiKey() {
   return key;
 }
 
+export function isArkApiKeyConfigured() {
+  return Boolean((process.env.ARK_API_KEY || '').trim());
+}
+
 /**
  * 启动时预检, 未配置则进程直接退出, 避免后续请求批量失败。
  */
+/** @deprecated 使用 videoProviderService.assertAnyVideoProviderConfiguredOrExit */
 export function assertArkApiKeyOrExit() {
   try {
     const key = getArkApiKey();

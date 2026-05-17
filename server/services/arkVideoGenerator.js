@@ -12,6 +12,7 @@
  */
 
 import { ARK_API_BASE_URL, ARK_DEFAULT_MODEL, getArkApiKey } from './arkConfig.js';
+import { buildArkContent } from './seedanceContentBuilder.js';
 
 export const ARK_MODEL_MAP = {
   // 别名 -> 官方 Model ID (可按需扩展)
@@ -78,63 +79,16 @@ function maskApiKey(apiKey) {
  *   2+ 张 → 全部 reference_image
  *
  * 若调用方已知更精确的角色 (例如首尾帧), 可传入 `[{ url, role }]` 对象数组。
+ *
+ * 方舟约束（与官方错误文案一致）: 一旦 content 中含 reference_video / reference_audio，
+ * 则不能再使用 first_frame / last_frame，须与「多模态参考」一致全部用 reference_image。
+ * 参见项目内 doc/火山引擎官方说明/Seedance 2.0 系列教程「多模态参考」示例代码。
  */
-function normalizeUrlList(input) {
-  if (!input) return [];
-  const arr = Array.isArray(input) ? input : [input];
-  return arr
-    .map((x) => (typeof x === 'string' ? x.trim() : ''))
-    .filter(Boolean);
-}
-
 /**
  * 占位说明:
  * 视频/音频 URL 现在由 TOS 预签名 URL 提供 (真实可下载的 HTTPS URL).
  * 不再需要 file_id / placeholder 机制.
  */
-
-function buildContent({
-  prompt,
-  imageUrls = [],
-  videoUrl = '',
-  videoUrls = [],
-  audioUrl = '',
-  audioUrls = [],
-}) {
-  const content = [];
-  if (prompt && String(prompt).trim()) {
-    content.push({ type: 'text', text: String(prompt) });
-  }
-
-  const items = imageUrls
-    .map((item) => (typeof item === 'string' ? { url: item } : item))
-    .filter((item) => item && item.url);
-
-  const hasExplicitRoles = items.some((item) => item.role);
-  const defaultRole = items.length <= 1 ? 'first_frame' : 'reference_image';
-
-  items.forEach((item) => {
-    content.push({
-      type: 'image_url',
-      image_url: { url: item.url },
-      role: item.role || (hasExplicitRoles ? 'reference_image' : defaultRole),
-    });
-  });
-
-  // 视频: 直接使用 HTTPS URL (TOS 预签名 URL 或公网 URL)
-  const videos = [...normalizeUrlList(videoUrl), ...normalizeUrlList(videoUrls)];
-  videos.forEach((url) => {
-    content.push({ type: 'video_url', video_url: { url }, role: 'reference_video' });
-  });
-
-  // 音频: 同上
-  const audios = [...normalizeUrlList(audioUrl), ...normalizeUrlList(audioUrls)];
-  audios.forEach((url) => {
-    content.push({ type: 'audio_url', audio_url: { url }, role: 'reference_audio' });
-  });
-  return content;
-}
-
 
 // ============================================================
 // HTTP 调用 + 重试
@@ -241,7 +195,6 @@ export async function createArkTask({
   duration = 5,
   resolution,
   seed,
-  cameraFixed,
   generateAudio = true,
   watermark = false,
   onRetry,
@@ -250,7 +203,7 @@ export async function createArkTask({
 
   const payload = {
     model: resolveArkModelId(model),
-    content: buildContent({ prompt, imageUrls, videoUrl, videoUrls, audioUrl, audioUrls }),
+    content: buildArkContent({ prompt, imageUrls, videoUrl, videoUrls, audioUrl, audioUrls }),
     ratio,
     duration: Number(duration) || 5,
     generate_audio: Boolean(generateAudio),
@@ -258,7 +211,6 @@ export async function createArkTask({
   };
   if (resolution) payload.resolution = String(resolution);
   if (typeof seed === 'number' && Number.isFinite(seed)) payload.seed = Math.trunc(seed);
-  if (typeof cameraFixed === 'boolean') payload.camera_fixed = cameraFixed;
 
   // 日志: 截断 data URI / 长 URL, 避免刷屏
   const safeContent = payload.content.map((c) => {
@@ -334,7 +286,6 @@ export async function generateArkVideo(opts) {
     duration = 5,
     resolution,
     seed,
-    cameraFixed,
     generateAudio = true,
     watermark = false,
     pollIntervalMs = 15000,
@@ -364,7 +315,6 @@ export async function generateArkVideo(opts) {
     duration,
     resolution,
     seed,
-    cameraFixed,
     generateAudio,
     watermark,
     onRetry: handleRetry,

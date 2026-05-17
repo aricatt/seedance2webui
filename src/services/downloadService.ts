@@ -1,4 +1,5 @@
 import type { DownloadTaskList, ApiResponse } from '../types/index';
+import { wrapExternalMediaForBrowser } from '../utils/tosImage';
 import { getAuthHeaders } from './authService';
 
 const API_BASE = '/api';
@@ -58,7 +59,11 @@ async function getErrorMessage(response: Response, fallback: string): Promise<st
   }
 }
 
-async function createDownloadToken(taskId: number): Promise<string> {
+async function createFileDownloadPayload(taskId: number): Promise<{
+  token?: string;
+  directUrl?: string;
+  proxyVideoUrl?: string;
+}> {
   const response = await fetch(`${API_BASE}/download/tasks/${taskId}/file-token`, {
     method: 'POST',
     cache: 'no-store',
@@ -72,12 +77,16 @@ async function createDownloadToken(taskId: number): Promise<string> {
     throw new Error(await getErrorMessage(response, `下载文件失败（HTTP ${response.status}）`));
   }
 
-  const result: ApiResponse<{ token: string }> = await response.json();
-  if (!result.success || !result.data?.token) {
+  const result: ApiResponse<{ token?: string; directUrl?: string; proxyVideoUrl?: string }> =
+    await response.json();
+  if (
+    !result.success
+    || (!result.data?.token && !result.data?.directUrl && !result.data?.proxyVideoUrl)
+  ) {
     throw new Error(result.error || '下载文件失败');
   }
 
-  return result.data.token;
+  return result.data;
 }
 
 function getFallbackFilename(taskId: number, fallbackFilename?: string): string {
@@ -164,12 +173,27 @@ export async function batchDownloadVideos(
  * 下载服务器本地已保存的视频到浏览器
  */
 export async function downloadLocalVideoFile(taskId: number, fallbackFilename?: string): Promise<void> {
-  const token = await createDownloadToken(taskId);
-  const downloadUrl = buildBrowserDownloadUrl(
-    `${API_BASE}/download/file-by-token?token=${encodeURIComponent(token)}`
-  );
-
-  triggerBrowserDownload(downloadUrl, getFallbackFilename(taskId, fallbackFilename));
+  const data = await createFileDownloadPayload(taskId);
+  const name = getFallbackFilename(taskId, fallbackFilename);
+  if (data.proxyVideoUrl) {
+    triggerBrowserDownload(buildBrowserDownloadUrl(data.proxyVideoUrl), name);
+    return;
+  }
+  if (data.directUrl) {
+    triggerBrowserDownload(
+      buildBrowserDownloadUrl(wrapExternalMediaForBrowser(data.directUrl)),
+      name,
+    );
+    return;
+  }
+  if (data.token) {
+    const downloadUrl = buildBrowserDownloadUrl(
+      `${API_BASE}/download/file-by-token?token=${encodeURIComponent(data.token)}`,
+    );
+    triggerBrowserDownload(downloadUrl, name);
+    return;
+  }
+  throw new Error('服务器未返回下载链接');
 }
 
 /**
@@ -190,12 +214,24 @@ export async function createStreamUrl(taskId: number): Promise<string> {
     throw new Error(await getErrorMessage(response, `获取播放链接失败（HTTP ${response.status}）`));
   }
 
-  const result: ApiResponse<{ token: string }> = await response.json();
-  if (!result.success || !result.data?.token) {
+  const result: ApiResponse<{ token?: string; streamUrl?: string; proxyVideoUrl?: string }> =
+    await response.json();
+  if (
+    !result.success
+    || (!result.data?.token && !result.data?.streamUrl && !result.data?.proxyVideoUrl)
+  ) {
     throw new Error(result.error || '获取播放链接失败');
   }
 
-  return `${API_BASE}/download/stream-by-token?token=${encodeURIComponent(result.data.token)}`;
+  if (result.data.proxyVideoUrl) {
+    return buildBrowserDownloadUrl(result.data.proxyVideoUrl);
+  }
+
+  if (result.data.streamUrl) {
+    return wrapExternalMediaForBrowser(result.data.streamUrl);
+  }
+
+  return `${API_BASE}/download/stream-by-token?token=${encodeURIComponent(result.data.token!)}`;
 }
 
 /**

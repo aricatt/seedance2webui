@@ -478,7 +478,8 @@ export default function AdminPage() {
                             {user.status === 'active' ? '正常' : '禁用'}
                           </span>
                         </td>
-                        <td className="px-6 py-4 text-sm text-white">{user.credits}</td>
+                        {/* Credits column hidden - using ModelToo budget system instead */}
+                        {/* <td className="px-6 py-4 text-sm text-white">{user.credits}</td> */}
                         <td className="px-6 py-4 text-sm text-gray-400">
                           {formatDbDate((user as any).created_at || user.createdAt)}
                         </td>
@@ -763,9 +764,10 @@ export default function AdminPage() {
                   </div>
                 </div>
 
-                <div>
+                {/* Credits editing disabled - using ModelToo budget system instead */}
+                {/* <div>
                   <label className="block text-sm font-medium text-gray-300 mb-2">
-                    修改积分
+                    积分操作
                   </label>
                   <div className="flex gap-2">
                     <select
@@ -786,7 +788,7 @@ export default function AdminPage() {
                       min="0"
                     />
                   </div>
-                </div>
+                </div> */}
 
                 <div>
                   <label className="block text-sm font-medium text-gray-300 mb-2">
@@ -817,12 +819,7 @@ export default function AdminPage() {
                   >
                     取消
                   </button>
-                  <button
-                    onClick={handleUpdateCredits}
-                    className="flex-1 px-4 py-3 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-xl font-medium transition-all"
-                  >
-                    保存积分
-                  </button>
+                  {/* Credits save button removed - using ModelToo budget system instead */}
                 </div>
               </div>
             </div>
@@ -878,7 +875,8 @@ export default function AdminPage() {
                   />
                   <p className="text-xs text-gray-500 mt-1">请告知用户登录后尽快自行修改</p>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                {/* Initial credits field hidden - using ModelToo budget system instead */}
+                {/* <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-sm font-medium text-gray-300 mb-2">角色</label>
                     <select
@@ -909,6 +907,22 @@ export default function AdminPage() {
                       className="w-full px-4 py-3 bg-[#0f111a] border border-gray-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
                     />
                   </div>
+                </div> */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">角色</label>
+                  <select
+                    value={createForm.role}
+                    onChange={(e) =>
+                      setCreateForm((f) => ({
+                        ...f,
+                        role: e.target.value as 'user' | 'admin',
+                      }))
+                    }
+                    className="w-full px-4 py-3 bg-[#0f111a] border border-gray-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  >
+                    <option value="user">普通用户</option>
+                    <option value="admin">管理员</option>
+                  </select>
                 </div>
 
                 <div className="flex gap-3 pt-2">
